@@ -5,7 +5,8 @@ var PocketStore = (function () {
   var SESS = 'pocket.session.v1';
   var RECENTS = 'pocket.recents.v1';
   var LOG = 'pocket.log.v1';
-  var APP_VERSION = '0.7.0';
+  var PLACES = 'pocket.places.v1';
+  var APP_VERSION = '0.8.0';
 
   function loadNotes() {
     try { return JSON.parse(localStorage.getItem(KEY) || '[]'); } catch (e) { return []; }
@@ -117,6 +118,49 @@ var PocketStore = (function () {
     return loadNotes().slice(0, limit || 40).map(function (n) { return '- ' + n.text; }).join('\n');
   }
 
+  function loadPlaces() {
+    try { return JSON.parse(localStorage.getItem(PLACES) || '{}'); } catch (e) { return {}; }
+  }
+  function savePlaces(p) {
+    try { localStorage.setItem(PLACES, JSON.stringify(p || {})); } catch (e) {}
+  }
+  /** slots: home, work, plus favorites[] */
+  function getPlace(slot) {
+    var p = loadPlaces();
+    return p[slot] || null;
+  }
+  function setPlace(slot, place) {
+    var p = loadPlaces();
+    if (!place) delete p[slot];
+    else {
+      p[slot] = {
+        name: place.name || slot,
+        address: place.address || '',
+        lat: place.lat,
+        lon: place.lon
+      };
+    }
+    // also keep recent destinations
+    if (place && place.lat != null) {
+      var fav = p.favorites || [];
+      fav = fav.filter(function (f) {
+        return !(f.lat === place.lat && f.lon === place.lon);
+      });
+      fav.unshift({
+        name: place.name || 'Place',
+        address: place.address || '',
+        lat: place.lat,
+        lon: place.lon
+      });
+      if (fav.length > 12) fav = fav.slice(0, 12);
+      p.favorites = fav;
+    }
+    savePlaces(p);
+  }
+  function loadFavorites() {
+    return loadPlaces().favorites || [];
+  }
+
   return {
     APP_VERSION: APP_VERSION,
     loadNotes: loadNotes,
@@ -130,6 +174,11 @@ var PocketStore = (function () {
     loadRecents: loadRecents,
     pushRecent: pushRecent,
     loadLog: loadLog,
-    log: log
+    log: log,
+    loadPlaces: loadPlaces,
+    savePlaces: savePlaces,
+    getPlace: getPlace,
+    setPlace: setPlace,
+    loadFavorites: loadFavorites
   };
 })();

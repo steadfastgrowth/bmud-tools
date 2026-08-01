@@ -5,13 +5,14 @@ PRIVACY:
   /v1/messages/*  → local imsg ONLY (never Mini/Grok)
   /v1/hermes      → local hermes CLI on this Mac
   /v1/music/*     → Spotify Connect on this Mac (Hermes tokens)
+  /v1/maps/*      → OpenStreetMap (Nominatim + OSRM)
   other routes    → Mini bridge (Grok/Whisper)
 
-  export POCKET_TOKEN=your-shared-secret
-  export MINI_BRIDGE=http://127.0.0.1:8787   # optional Mini AI/STT
-  export IMSG_BIN=imsg                       # or full path to imsg binary
+  export POCKET_TOKEN=...
+  export MINI_BRIDGE=http://192.168.1.78:8787
+  export IMSG_BIN=~/Downloads/imsg-bin/imsg
   export HERMES_BIN=hermes
-  python3 pocket_relay.py
+  python3 pocket_imsg_relay.py
 """
 from __future__ import annotations
 
@@ -595,6 +596,217 @@ def spotify_ready() -> tuple[bool, str | None]:
         return False, str(e)[:200]
 
 
+# --- Maps (OpenStreetMap: Nominatim + OSRM) — private by default, no Google ---
+NOMINATIM = os.environ.get("NOMINATIM_URL", "https://nominatim.openstreetmap.org").rstrip("/")
+OSRM = os.environ.get("OSRM_URL", "https://router.project-osrm.org").rstrip("/")
+MAPS_UA = os.environ.get("MAPS_USER_AGENT", "B-MudTools/0.8 (KaiOS flip; personal use)")
+
+
+def _http_json(url: str, timeout: int = 20) -> Any:
+    req = urllib.request.Request(url, headers={"User-Agent": MAPS_UA, "Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode() or "{}")
+
+
+def maps_search(q: str, limit: int = 8, near_lat: float | None = None, near_lon: float | None = None) -> dict:
+    q = (q or "").strip()
+    if not q:
+        raise ValueError("q required")
+    params: dict[str, str] = {
+        "q": q,
+        "format": "json",
+        "addressdetails": "1",
+        "limit": str(max(1, min(limit, 15))),
+    }
+    if near_lat is not None and near_lon is not None:
+        # bias: viewbox ~0.3 deg around point
+        d = 0.25
+        params["viewbox"] = f"{near_lon-d},{near_lat+d},{near_lon+d},{near_lat-d}"
+        params["bounded"] = "0"
+    url = NOMINATIM + "/search?" + urllib.parse.urlencode(params)
+    raw = _http_json(url)
+    places = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        lat = item.get("lat")
+        lon = item.get("lon")
+        if lat is None or lon is None:
+            continue
+        name = item.get("name") or (item.get("display_name") or "").split(",")[0]
+        places.append(
+            {
+                "name": name,
+                "address": item.get("display_name") or "",
+                "lat": float(lat),
+                "lon": float(lon),
+                "type": item.get("type") or item.get("class") or "",
+                "osm_id": item.get("osm_id"),
+            }
+        )
+    return {"places": places, "query": q, "provider": "nominatim", "count": len(places)}
+
+
+def maps_geocode(q: str) -> dict:
+    r = maps_search(q, limit=1)
+    places = r.get("places") or []
+    if not places:
+        raise ValueError("place not found: " + q)
+    return places[0]
+
+
+def maps_reverse(lat: float, lon: float) -> dict:
+    params = {"lat": str(lat), "lon": str(lon), "format": "json", "addressdetails": "1"}
+    url = NOMINATIM + "/reverse?" + urllib.parse.urlencode(params)
+    item = _http_json(url)
+    if not isinstance(item, dict) or item.get("error"):
+        raise ValueError(str((item or {}).get("error") or "reverse geocode failed"))
+    return {
+        "name": item.get("name") or (item.get("display_name") or "").split(",")[0],
+        "address": item.get("display_name") or "",
+        "lat": float(item.get("lat") or lat),
+        "lon": float(item.get("lon") or lon),
+        "provider": "nominatim",
+    }
+
+
+def _resolve_point(obj: Any, label: str) -> dict:
+    """Accept {lat,lon} or {q} or string."""
+    if obj is None:
+        raise ValueError(f"{label} required")
+    if isinstance(obj, str):
+        return maps_geocode(obj)
+    if not isinstance(obj, dict):
+        raise ValueError(f"invalid {label}")
+    if obj.get("lat") is not None and obj.get("lon") is not None:
+        return {
+            "name": obj.get("name") or label,
+            "address": obj.get("address") or "",
+            "lat": float(obj["lat"]),
+            "lon": float(obj["lon"]),
+        }
+    q = obj.get("q") or obj.get("query") or obj.get("address") or obj.get("name")
+    if q:
+        p = maps_geocode(str(q))
+        if obj.get("name"):
+            p["name"] = obj["name"]
+        return p
+    raise ValueError(f"{label} needs lat/lon or q")
+
+
+def maps_directions(
+    origin: Any,
+    destination: Any,
+    mode: str = "driving",
+) -> dict:
+    mode = (mode or "driving").lower().strip()
+    if mode not in ("driving", "walking", "cycling"):
+        mode = "driving"
+    o = _resolve_point(origin, "from")
+    d = _resolve_point(destination, "to")
+    # OSRM: lon,lat
+    profile = {"driving": "driving", "walking": "walking", "cycling": "cycling"}[mode]
+    coords = f"{o['lon']},{o['lat']};{d['lon']},{d['lat']}"
+    url = (
+        f"{OSRM}/route/v1/{profile}/{coords}"
+        f"?overview=false&steps=true&annotations=false"
+    )
+    data = _http_json(url, timeout=30)
+    if data.get("code") != "Ok":
+        raise RuntimeError(data.get("message") or data.get("code") or "routing failed")
+    routes = data.get("routes") or []
+    if not routes:
+        raise RuntimeError("no route")
+    route = routes[0]
+    legs = route.get("legs") or []
+    steps_out = []
+    n = 0
+    for leg in legs:
+        for step in leg.get("steps") or []:
+            man = step.get("maneuver") or {}
+            instruction = step.get("name") or ""
+            mtype = man.get("type") or ""
+            modifier = man.get("modifier") or ""
+            # Humanize
+            if mtype == "depart":
+                text = "Start on " + (instruction or "road")
+            elif mtype == "arrive":
+                text = "Arrive at destination"
+            elif mtype == "turn":
+                text = f"Turn {modifier} onto {instruction}".strip()
+            elif mtype == "new name":
+                text = f"Continue on {instruction}".strip()
+            elif mtype == "merge":
+                text = f"Merge {modifier} onto {instruction}".strip()
+            elif mtype == "roundabout":
+                text = f"Roundabout {modifier} to {instruction}".strip()
+            elif mtype == "end of road":
+                text = f"At end of road, turn {modifier} onto {instruction}".strip()
+            elif mtype == "fork":
+                text = f"Keep {modifier} at fork onto {instruction}".strip()
+            elif mtype == "continue":
+                text = f"Continue on {instruction}".strip()
+            else:
+                text = (mtype + " " + modifier + " " + instruction).strip()
+            dist_m = float(step.get("distance") or 0)
+            dur_s = float(step.get("duration") or 0)
+            n += 1
+            steps_out.append(
+                {
+                    "i": n,
+                    "text": text,
+                    "distance_m": round(dist_m),
+                    "duration_s": round(dur_s),
+                    "distance": _fmt_dist(dist_m),
+                    "duration": _fmt_dur(dur_s),
+                }
+            )
+    total_m = float(route.get("distance") or 0)
+    total_s = float(route.get("duration") or 0)
+    return {
+        "provider": "osrm",
+        "mode": mode,
+        "from": o,
+        "to": d,
+        "distance_m": round(total_m),
+        "duration_s": round(total_s),
+        "distance": _fmt_dist(total_m),
+        "duration": _fmt_dur(total_s),
+        "steps": steps_out,
+        "step_count": len(steps_out),
+    }
+
+
+def _fmt_dist(m: float) -> str:
+    if m < 1000:
+        return f"{int(round(m))} m"
+    mi = m / 1609.344
+    if mi < 10:
+        return f"{mi:.1f} mi"
+    return f"{mi:.0f} mi"
+
+
+def _fmt_dur(s: float) -> str:
+    s = int(round(s))
+    if s < 60:
+        return f"{s}s"
+    mins = s // 60
+    if mins < 60:
+        return f"{mins} min"
+    h = mins // 60
+    m = mins % 60
+    return f"{h}h {m}m"
+
+
+def maps_ready() -> tuple[bool, str | None]:
+    try:
+        # light check — don't hammer APIs
+        return True, None
+    except Exception as e:
+        return False, str(e)[:200]
+
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "PocketRelay/0.2"
 
@@ -680,6 +892,8 @@ class Handler(BaseHTTPRequestHandler):
                     "contacts_loaded": len(_CONTACT_LIST),
                     "contacts_keys": len(_CONTACT_CACHE),
                     "contacts_error": _CONTACT_LOAD_ERROR,
+                    "maps_ready": True,
+                    "maps_provider": "osm",
                     "imsg": IMSG,
                 }
             )
@@ -733,6 +947,61 @@ class Handler(BaseHTTPRequestHandler):
 
         # Never proxy /v1/messages/* to Mini
         if path.startswith("/v1/messages"):
+            self._json(404, {"error": "not found"})
+            return
+
+
+        if path in ("/v1/maps/search", "/v1/maps/geocode"):
+            q = (qs.get("q") or qs.get("query") or [""])[0]
+            if not q:
+                self._json(400, {"error": "q required"})
+                return
+            try:
+                limit = int((qs.get("limit") or ["8"])[0])
+            except ValueError:
+                limit = 8
+            near_lat = near_lon = None
+            try:
+                if qs.get("near_lat"):
+                    near_lat = float(qs.get("near_lat")[0])
+                if qs.get("near_lon"):
+                    near_lon = float(qs.get("near_lon")[0])
+            except ValueError:
+                pass
+            try:
+                if path.endswith("geocode"):
+                    self._json(200, maps_geocode(q))
+                else:
+                    self._json(200, maps_search(q, limit, near_lat, near_lon))
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
+        if path == "/v1/maps/reverse":
+            try:
+                lat = float((qs.get("lat") or [""])[0])
+                lon = float((qs.get("lon") or [""])[0])
+                self._json(200, maps_reverse(lat, lon))
+            except Exception as e:
+                self._json(400, {"error": str(e)})
+            return
+
+        if path == "/v1/maps/directions":
+            # GET convenience: from_q / to_q
+            try:
+                mode = (qs.get("mode") or ["driving"])[0]
+                if qs.get("from_lat") and qs.get("to_lat"):
+                    origin = {"lat": float(qs["from_lat"][0]), "lon": float(qs["from_lon"][0])}
+                    dest = {"lat": float(qs["to_lat"][0]), "lon": float(qs["to_lon"][0])}
+                else:
+                    origin = (qs.get("from") or qs.get("from_q") or [""])[0]
+                    dest = (qs.get("to") or qs.get("to_q") or [""])[0]
+                self._json(200, maps_directions(origin, dest, mode))
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
+        if path.startswith("/v1/maps"):
             self._json(404, {"error": "not found"})
             return
 
@@ -821,6 +1090,42 @@ class Handler(BaseHTTPRequestHandler):
 
         if path.startswith("/v1/messages"):
             self._json(404, {"error": "not found"})
+            return
+
+
+        if path in ("/v1/maps/directions", "/v1/maps/route"):
+            try:
+                payload = json.loads(body.decode() or "{}")
+            except json.JSONDecodeError:
+                self._json(400, {"error": "invalid json"})
+                return
+            try:
+                origin = payload.get("from") or payload.get("origin")
+                dest = payload.get("to") or payload.get("destination")
+                mode = payload.get("mode") or "driving"
+                self._json(200, maps_directions(origin, dest, str(mode)))
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
+        if path == "/v1/maps/search":
+            try:
+                payload = json.loads(body.decode() or "{}")
+            except json.JSONDecodeError:
+                self._json(400, {"error": "invalid json"})
+                return
+            try:
+                q = payload.get("q") or payload.get("query") or ""
+                limit = int(payload.get("limit") or 8)
+                near_lat = payload.get("near_lat")
+                near_lon = payload.get("near_lon")
+                if near_lat is not None:
+                    near_lat = float(near_lat)
+                if near_lon is not None:
+                    near_lon = float(near_lon)
+                self._json(200, maps_search(str(q), limit, near_lat, near_lon))
+            except Exception as e:
+                self._json(500, {"error": str(e)})
             return
 
         if path in ("/v1/music/control", "/v1/music/play"):

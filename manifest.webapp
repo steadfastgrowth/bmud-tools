@@ -26,7 +26,7 @@
   ],
   "b2g_features": {
     "type": "web",
-    "version": "0.7.2",
+    "version": "0.8.0",
     "developer": {
       "name": "B-Mud",
       "url": "https://github.com/steadfastgrowth/bmud-tools"

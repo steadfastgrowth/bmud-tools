@@ -152,6 +152,21 @@ var PocketBridge = (function () {
       var path = '/v1/contacts?limit=' + encodeURIComponent(limit || 30);
       if (q) path += '&q=' + encodeURIComponent(q);
       return request('GET', path, null, 15000);
+    },
+    mapsSearch: function (q, limit) {
+      var path = '/v1/maps/search?limit=' + encodeURIComponent(limit || 8);
+      if (q) path += '&q=' + encodeURIComponent(q);
+      return request('GET', path, null, 20000);
+    },
+    mapsDirections: function (fromObj, toObj, mode) {
+      return request('POST', '/v1/maps/directions', {
+        from: fromObj,
+        to: toObj,
+        mode: mode || 'driving'
+      }, 45000);
+    },
+    mapsGeocode: function (q) {
+      return request('GET', '/v1/maps/geocode?q=' + encodeURIComponent(q || ''), null, 20000);
     }
   };
 })();

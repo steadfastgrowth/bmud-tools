@@ -248,8 +248,9 @@
         <li tabindex="0" data-go="notes"><span class="num">1</span> Notes + Voice<span class="sub">Capture · SIDE button = mic</span></li>
         <li tabindex="0" data-go="ai"><span class="num">2</span> AI<span class="sub">Ask / summarize your notes</span></li>
         <li tabindex="0" data-go="messages"><span class="num">3</span> Messages<span class="sub">iMessage via Mac</span></li>
-        <li tabindex="0" data-go="music"><span class="num">4</span> Music<span class="sub">Search · play on phone</span></li>
-        <li tabindex="0" data-go="settings"><span class="num">5</span> Settings<span class="sub">Bridge URL + token</span></li>
+        <li tabindex="0" data-go="maps"><span class="num">4</span> Maps<span class="sub">OSM search · text directions</span></li>
+        <li tabindex="0" data-go="music"><span class="num">5</span> Music<span class="sub">Search · play on phone</span></li>
+        <li tabindex="0" data-go="settings"><span class="num">6</span> Settings<span class="sub">Bridge URL + token</span></li>
       </ul>
       <div class="scroll-end"></div>
     </section>
@@ -336,6 +337,37 @@
         <textarea id="msgBody" rows="3" tabindex="0" placeholder="Message…"></textarea>
         <button type="button" class="btn talk" id="btnCompMic" tabindex="0">Talk into body</button>
         <button type="button" class="btn primary" id="btnCompSend" tabindex="0">Send</button>
+      </div>
+      <div class="scroll-end"></div>
+    </section>
+
+    <section id="v-maps" class="view">
+      <div class="card">
+        <h2>Maps</h2>
+        <div class="hint" id="mapsHint">OpenStreetMap · private · text steps</div>
+        <div class="row">
+          <button type="button" class="btn primary" id="btnNavHome" tabindex="0" data-action="nav-home">→ Home</button>
+          <button type="button" class="btn primary" id="btnNavWork" tabindex="0" data-action="nav-work">→ Work</button>
+        </div>
+        <label>Find place</label>
+        <input id="mapsQ" type="text" tabindex="0" placeholder="Address or place…" />
+        <button type="button" class="btn primary" id="btnMapsSearch" tabindex="0" data-action="maps-search">Search</button>
+        <div class="row">
+          <button type="button" class="btn ghost" id="btnSetHome" tabindex="0" data-action="maps-set-home">Save as Home</button>
+          <button type="button" class="btn ghost" id="btnSetWork" tabindex="0" data-action="maps-set-work">Save as Work</button>
+        </div>
+        <div class="now" id="mapsNow">—</div>
+        <ul class="list" id="mapsPlaces"></ul>
+      </div>
+      <div class="card">
+        <h2>Saved</h2>
+        <div class="hint" id="mapsSavedHint">Set Home/Work from a search result</div>
+        <ul class="list" id="mapsSaved"></ul>
+      </div>
+      <div class="card" id="mapsRouteCard">
+        <h2>Directions</h2>
+        <div class="hint" id="mapsRouteMeta">—</div>
+        <ul class="list" id="mapsSteps"></ul>
       </div>
       <div class="scroll-end"></div>
     </section>

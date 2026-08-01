@@ -158,6 +158,7 @@
     messages: 'v-messages',
     thread: 'v-thread',
     compose: 'v-compose',
+    maps: 'v-maps',
     music: 'v-music',
     settings: 'v-settings'
   };
@@ -169,9 +170,14 @@
     messages: 'Messages',
     thread: 'Chat',
     compose: 'New msg',
+    maps: 'Maps',
     music: 'Music',
     settings: 'Settings'
   };
+
+  var mapPlaces = [];
+  var mapSelected = null; // last focused/selected place
+  var mapSteps = [];
 
   function show(name, push) {
     if (push && view && view !== name && view !== 'hub') stack.push(view);
@@ -199,6 +205,10 @@
       renderRecents();
     }
     if (name === 'ai') syncAiModeUi();
+    if (name === 'maps') {
+      renderMapsSaved();
+      refreshMapsNow();
+    }
     if (name === 'music') refreshMusicDeviceHint();
     if (name === 'settings') {
       fillCfg();
@@ -253,6 +263,13 @@
       else if (id === 'btnAiMode') c = 'Toggle';
       else if (id === 'btnSum') c = 'Sum';
       else c = 'Ask';
+    } else if (view === 'maps') {
+      if (el && el.getAttribute && el.getAttribute('data-place-i') != null) c = 'Go';
+      else if (el && el.getAttribute && el.getAttribute('data-saved') != null) c = 'Go';
+      else if (el && el.getAttribute && el.getAttribute('data-step-i') != null) c = 'Read';
+      else if (id === 'btnNavHome' || id === 'btnNavWork') c = 'Go';
+      else if (id === 'btnSetHome' || id === 'btnSetWork') c = 'Save';
+      else c = 'Search';
     } else if (view === 'music') {
       if (el && el.getAttribute && el.getAttribute('data-track-i') != null) c = 'Play';
       else if (el && el.getAttribute && el.getAttribute('data-device-i') != null) c = 'Pick';
@@ -354,6 +371,11 @@
       case 'ask': ask('chat'); return true;
       case 'sum': ask('sum'); return true;
       case 'ai-mode': toggleAiMode(); return true;
+      case 'maps-search': mapsSearch(); return true;
+      case 'nav-home': navigateToSaved('home'); return true;
+      case 'nav-work': navigateToSaved('work'); return true;
+      case 'maps-set-home': mapsSaveSelected('home'); return true;
+      case 'maps-set-work': mapsSaveSelected('work'); return true;
       case 'music-search': musicSearch(); return true;
       case 'music-play': playPhoneTrack(lastTrack); return true;
       case 'music-stop': stopPhoneAudio(); return true;
@@ -408,6 +430,35 @@
       if (id === 'btnAiMode') { toggleAiMode(); return; }
       if (id === 'btnSum') { ask('sum'); return; }
       ask('chat');
+      return;
+    }
+    if (view === 'maps') {
+      var pi = el.getAttribute && el.getAttribute('data-place-i');
+      if (pi != null && pi !== '') {
+        startDirectionsTo(mapPlaces[parseInt(pi, 10)]);
+        return;
+      }
+      var sav = el.getAttribute && el.getAttribute('data-saved');
+      if (sav) {
+        navigateToSaved(sav);
+        return;
+      }
+      var pf = el.getAttribute && el.getAttribute('data-place-fav');
+      if (pf != null && pf !== '') {
+        var favs = PocketStore.loadFavorites();
+        startDirectionsTo(favs[parseInt(pf, 10)]);
+        return;
+      }
+      if (el.getAttribute && el.getAttribute('data-step-i') != null) {
+        ensureVisible(el);
+        return;
+      }
+      if (id === 'btnNavHome') { navigateToSaved('home'); return; }
+      if (id === 'btnNavWork') { navigateToSaved('work'); return; }
+      if (id === 'btnSetHome') { mapsSaveSelected('home'); return; }
+      if (id === 'btnSetWork') { mapsSaveSelected('work'); return; }
+      if (id === 'btnMapsSearch' || id === 'mapsQ') { mapsSearch(); return; }
+      mapsSearch();
       return;
     }
     if (view === 'music') {
@@ -763,6 +814,7 @@
       if (r.stt_ready || r.stt_configured) bits.push('stt');
       if (r.spotify_ready || r.spotify_configured) bits.push('spotify');
       if (r.hermes_ready || r.hermes_configured) bits.push('hermes');
+      if (r.maps_ready || r.maps_provider) bits.push('maps');
       if (r.contacts_loaded) bits.push(r.contacts_loaded + ' contacts');
       if (r.relay) bits.push(r.relay);
       var line = bits.join(' · ') || 'ok';
@@ -1131,6 +1183,273 @@
       log('ai fail: ' + err, 'err');
       setStatus('offline', false);
       setTimeout(focusFirstAiChunk, 40);
+    });
+  }
+
+  function setMapsNow(txt) {
+    if ($('mapsNow')) $('mapsNow').textContent = txt || '—';
+  }
+
+  function refreshMapsNow() {
+    var home = PocketStore.getPlace('home');
+    var work = PocketStore.getPlace('work');
+    var bits = [];
+    bits.push(home ? ('Home: ' + (home.name || 'set')) : 'Home: not set');
+    bits.push(work ? ('Work: ' + (work.name || 'set')) : 'Work: not set');
+    setMapsNow(bits.join(' · '));
+    if ($('mapsHint')) $('mapsHint').textContent = 'OpenStreetMap · private · text steps';
+  }
+
+  function renderMapsSaved() {
+    var ul = $('mapsSaved');
+    if (!ul) return;
+    ul.innerHTML = '';
+    var slots = [
+      { key: 'home', label: 'Home' },
+      { key: 'work', label: 'Work' }
+    ];
+    var i, s, place, li;
+    for (i = 0; i < slots.length; i++) {
+      s = slots[i];
+      place = PocketStore.getPlace(s.key);
+      li = document.createElement('li');
+      li.tabIndex = 0;
+      li.setAttribute('data-saved', s.key);
+      li.innerHTML = '<div class="name"></div><span class="sub"></span>';
+      li.querySelector('.name').textContent = s.label + (place ? '' : ' (empty)');
+      li.querySelector('.sub').textContent = place
+        ? ((place.address || place.name || '').slice(0, 80))
+        : 'Search a place, then Save as ' + s.label;
+      (function (slot) {
+        li.onclick = function () { navigateToSaved(slot); };
+      })(s.key);
+      ul.appendChild(li);
+    }
+    var fav = PocketStore.loadFavorites();
+    for (i = 0; i < fav.length && i < 6; i++) {
+      place = fav[i];
+      li = document.createElement('li');
+      li.tabIndex = 0;
+      li.setAttribute('data-place-fav', String(i));
+      li.innerHTML = '<div class="name"></div><span class="sub"></span>';
+      li.querySelector('.name').textContent = place.name || 'Place';
+      li.querySelector('.sub').textContent = (place.address || '').slice(0, 80);
+      (function (p) {
+        li.onclick = function () { startDirectionsTo(p); };
+      })(place);
+      ul.appendChild(li);
+    }
+    if ($('mapsSavedHint')) {
+      $('mapsSavedHint').textContent = (homeWorkSet() ? 'Select a saved place to go' : 'Search → Select place → Save Home/Work');
+    }
+  }
+
+  function homeWorkSet() {
+    return !!(PocketStore.getPlace('home') || PocketStore.getPlace('work'));
+  }
+
+  function renderMapPlaces(list) {
+    mapPlaces = list || [];
+    var ul = $('mapsPlaces');
+    if (!ul) return;
+    ul.innerHTML = '';
+    var i, p, li;
+    for (i = 0; i < mapPlaces.length && i < 10; i++) {
+      p = mapPlaces[i];
+      li = document.createElement('li');
+      li.tabIndex = 0;
+      li.setAttribute('data-place-i', String(i));
+      li.innerHTML = '<div class="name"></div><span class="sub"></span>';
+      li.querySelector('.name').textContent = (i + 1) + '. ' + (p.name || 'Place');
+      li.querySelector('.sub').textContent = (p.address || p.type || '').slice(0, 90);
+      (function (place) {
+        li.onclick = function () {
+          mapSelected = place;
+          startDirectionsTo(place);
+        };
+      })(p);
+      ul.appendChild(li);
+    }
+  }
+
+  function renderMapSteps(route) {
+    mapSteps = (route && route.steps) || [];
+    var ul = $('mapsSteps');
+    if (!ul) return;
+    ul.innerHTML = '';
+    if ($('mapsRouteMeta')) {
+      if (!route) {
+        $('mapsRouteMeta').textContent = '—';
+      } else {
+        $('mapsRouteMeta').textContent =
+          (route.distance || '') + ' · ' + (route.duration || '') + ' · ' +
+          (route.mode || 'driving') + ' · ' + (route.step_count || mapSteps.length) + ' steps';
+      }
+    }
+    var i, s, li;
+    for (i = 0; i < mapSteps.length; i++) {
+      s = mapSteps[i];
+      li = document.createElement('li');
+      li.className = 'ai-chunk';
+      li.tabIndex = 0;
+      li.setAttribute('data-step-i', String(i));
+      li.innerHTML = '<span class="part"></span><div class="body"></div>';
+      li.querySelector('.part').textContent = String(s.i || (i + 1));
+      li.querySelector('.body').textContent =
+        (s.text || '') + (s.distance ? (' · ' + s.distance) : '');
+      ul.appendChild(li);
+    }
+  }
+
+  function mapsSearch() {
+    var q = ($('mapsQ') && $('mapsQ').value || '').replace(/^\s+|\s+$/g, '');
+    if (!q) {
+      toast('Type a place');
+      setMapsNow('Type an address or place name');
+      return;
+    }
+    if (!PocketBridge.base()) {
+      toast('Set bridge in Settings');
+      return;
+    }
+    toast('Searching…');
+    setMapsNow('Searching OSM…');
+    PocketBridge.mapsSearch(q, 8).then(function (r) {
+      var list = (r && r.places) || [];
+      renderMapPlaces(list);
+      if (!list.length) {
+        setMapsNow('No places found');
+        toast('No places');
+        return;
+      }
+      mapSelected = list[0];
+      setMapsNow(list.length + ' places · Select to go');
+      toast(list.length + ' places');
+      log('maps search ' + q);
+      setTimeout(function () {
+        collect();
+        var i;
+        for (i = 0; i < items.length; i++) {
+          if (items[i].getAttribute && items[i].getAttribute('data-place-i') === '0') {
+            focusAt(i);
+            return;
+          }
+        }
+      }, 40);
+    }).catch(function (e) {
+      setMapsNow(String(e.message || e));
+      toast('Maps: ' + (e.message || e));
+      log('maps search fail: ' + (e.message || e), 'err');
+    });
+  }
+
+  function mapsSaveSelected(slot) {
+    var place = mapSelected;
+    if (!place && items[idx] && items[idx].getAttribute) {
+      var pi = items[idx].getAttribute('data-place-i');
+      if (pi != null) place = mapPlaces[parseInt(pi, 10)];
+    }
+    if (!place || place.lat == null) {
+      toast('Pick a search result first');
+      return;
+    }
+    PocketStore.setPlace(slot, place);
+    mapSelected = place;
+    renderMapsSaved();
+    refreshMapsNow();
+    toast('Saved ' + slot + ': ' + (place.name || ''));
+    log('maps save ' + slot);
+  }
+
+  function navigateToSaved(slot) {
+    var place = PocketStore.getPlace(slot);
+    if (!place || place.lat == null) {
+      toast('Set ' + slot + ' first');
+      setMapsNow('Search a place, then Save as ' + slot);
+      return;
+    }
+    startDirectionsTo(place);
+  }
+
+  function startDirectionsTo(dest) {
+    if (!dest || dest.lat == null || dest.lon == null) {
+      toast('No destination');
+      return;
+    }
+    mapSelected = dest;
+    if (!PocketBridge.base()) {
+      toast('Set bridge in Settings');
+      return;
+    }
+    // Origin: Home if set, else geocode a default from saved home, else ask user
+    var origin = PocketStore.getPlace('home');
+    // If navigating TO home, use work as origin if available
+    var destIsHome = false;
+    var home = PocketStore.getPlace('home');
+    if (home && home.lat === dest.lat && home.lon === dest.lon) destIsHome = true;
+    if (destIsHome) {
+      origin = PocketStore.getPlace('work') || origin;
+    }
+    if (!origin || origin.lat == null) {
+      origin = PocketStore.getPlace('work');
+    }
+    if (!origin || origin.lat == null) {
+      toast('Set Home first (origin)');
+      setMapsNow('Save Home as your starting point, then navigate');
+      return;
+    }
+    if (origin.lat === dest.lat && origin.lon === dest.lon) {
+      toast('Already there');
+      return;
+    }
+
+    toast('Routing…');
+    setMapsNow('Routing via OSM…');
+    if ($('mapsRouteMeta')) $('mapsRouteMeta').textContent = 'Routing…';
+    renderMapSteps(null);
+
+    PocketBridge.mapsDirections(
+      { lat: origin.lat, lon: origin.lon, name: origin.name || 'Start' },
+      { lat: dest.lat, lon: dest.lon, name: dest.name || 'Destination', address: dest.address || '' },
+      'driving'
+    ).then(function (route) {
+      // favorites only (don't invent a _last slot as home)
+      try {
+        var pl = PocketStore.loadPlaces();
+        var fav = pl.favorites || [];
+        fav = fav.filter(function (f) {
+          return !(f.lat === dest.lat && f.lon === dest.lon);
+        });
+        fav.unshift({
+          name: dest.name || 'Place',
+          address: dest.address || '',
+          lat: dest.lat,
+          lon: dest.lon
+        });
+        if (fav.length > 12) fav = fav.slice(0, 12);
+        pl.favorites = fav;
+        PocketStore.savePlaces(pl);
+      } catch (eFav) {}
+      renderMapsSaved();
+      renderMapSteps(route);
+      setMapsNow((route.distance || '') + ' · ' + (route.duration || '') + ' → ' + (dest.name || ''));
+      toast((route.duration || 'OK') + ' · ' + (route.step_count || 0) + ' steps');
+      log('maps route ' + (dest.name || ''));
+      setTimeout(function () {
+        collect();
+        var i;
+        for (i = 0; i < items.length; i++) {
+          if (items[i].getAttribute && items[i].getAttribute('data-step-i') === '0') {
+            focusAt(i);
+            return;
+          }
+        }
+      }, 40);
+    }).catch(function (e) {
+      setMapsNow(String(e.message || e));
+      if ($('mapsRouteMeta')) $('mapsRouteMeta').textContent = String(e.message || e);
+      toast('Route: ' + (e.message || e));
+      log('maps route fail: ' + (e.message || e), 'err');
     });
   }
 
@@ -1519,6 +1838,11 @@
         });
       };
     }
+    if ($('btnMapsSearch')) $('btnMapsSearch').onclick = mapsSearch;
+    if ($('btnNavHome')) $('btnNavHome').onclick = function () { navigateToSaved('home'); };
+    if ($('btnNavWork')) $('btnNavWork').onclick = function () { navigateToSaved('work'); };
+    if ($('btnSetHome')) $('btnSetHome').onclick = function () { mapsSaveSelected('home'); };
+    if ($('btnSetWork')) $('btnSetWork').onclick = function () { mapsSaveSelected('work'); };
     if ($('btnSearch')) $('btnSearch').onclick = musicSearch;
     if ($('btnStop')) $('btnStop').onclick = stopPhoneAudio;
     if ($('btnRemote')) $('btnRemote').onclick = function () { musicCtrl('play'); };
