@@ -44,3 +44,23 @@ Enable **Remote Login** (sshd) on macOS targets: System Settings → General →
 - Same `POCKET_TOKEN` as the rest of the bridge.
 - Anyone with the token can run commands as your Mac’s SSH identity — keep the relay on LAN/tailnet only.
 - Prefer least-privilege keys / Tailscale ACLs for production.
+
+
+## Grok / interactive TUI tools
+
+The flip terminal has **no real TTY**. Apps that open a full-screen UI fail with:
+
+`Error: Device not configured (os error 6)`
+
+**Works (headless):**
+```bash
+grok -p "explain this error"
+grok --print "hi"
+hostname; uptime; ls
+```
+
+**Does not work:**
+```bash
+grok          # interactive TUI
+vim file.py   # needs TTY
+```

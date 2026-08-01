@@ -933,12 +933,26 @@ def term_exec(
     # --- local shell on the relay Mac ---
     if _is_local_host(host):
         shell = os.environ.get("SHELL") or "/bin/zsh"
+        env = os.environ.copy()
+        home = str(Path.home())
+        extras = [
+            f"{home}/.local/bin",
+            f"{home}/.grok/bin",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+        ]
+        env["PATH"] = ":".join(extras + [env.get("PATH") or "/usr/bin:/bin"])
+        env.setdefault("HOME", home)
+        env.setdefault("TERM", "xterm-256color")
+        # Prefer non-interactive friendly defaults for CLI tools
+        env.setdefault("NO_COLOR", "1")
         try:
             p = subprocess.run(
                 [shell, "-lc", command],
                 capture_output=True,
                 text=True,
                 timeout=timeout,
+                env=env,
             )
         except subprocess.TimeoutExpired as e:
             out = e.stdout if isinstance(e.stdout, str) else ""
@@ -957,6 +971,16 @@ def term_exec(
             }
         stdout = (p.stdout or "")[:TERM_MAX_OUTPUT]
         stderr = (p.stderr or "")[:8000]
+        tip = ""
+        blob = (stdout + "\n" + stderr).lower()
+        if "device not configured" in blob or "os error 6" in blob:
+            tip = (
+                "\n\n[hint] No TTY on flip terminal. Interactive TUI apps fail here.\n"
+                "  For Grok use:  grok -p \"your question\"\n"
+                "  or:            grok --print \"your question\"\n"
+                "  Interactive `grok` alone needs a real terminal window on the Mac."
+            )
+            stdout = (stdout or "") + tip
         return {
             "ok": p.returncode == 0,
             "host": host,

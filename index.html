@@ -377,7 +377,7 @@
     <section id="v-term" class="view">
       <div class="card">
         <h2>Terminal</h2>
-        <div class="hint" id="termHint">SSH via Mac · Tailscale hosts · key auth</div>
+        <div class="hint" id="termHint">SSH via Mac · use grok -p "question" (not bare grok)</div>
         <button type="button" class="btn primary" id="btnTermHosts" tabindex="0" data-action="term-hosts">Refresh hosts</button>
         <div class="now" id="termHostNow">Host: local (this Mac)</div>
         <ul class="list" id="termHosts"></ul>
@@ -386,7 +386,7 @@
         <label>Host override</label>
         <input id="termHost" type="text" tabindex="0" placeholder="local or 100.x / name" />
         <label>Command</label>
-        <textarea id="termCmd" rows="2" tabindex="0" placeholder="hostname; uptime"></textarea>
+        <textarea id="termCmd" rows="2" tabindex="0" placeholder='grok -p "summarize this repo"'></textarea>
         <button type="button" class="btn primary" id="btnTermRun" tabindex="0" data-action="term-run">Run</button>
       </div>
       <div class="card">
