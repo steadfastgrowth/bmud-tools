@@ -6,7 +6,7 @@ var PocketStore = (function () {
   var RECENTS = 'pocket.recents.v1';
   var LOG = 'pocket.log.v1';
   var PLACES = 'pocket.places.v1';
-  var APP_VERSION = '0.8.0';
+  var APP_VERSION = '0.9.0';
 
   function loadNotes() {
     try { return JSON.parse(localStorage.getItem(KEY) || '[]'); } catch (e) { return []; }

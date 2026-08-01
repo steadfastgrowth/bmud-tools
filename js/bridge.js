@@ -167,6 +167,18 @@ var PocketBridge = (function () {
     },
     mapsGeocode: function (q) {
       return request('GET', '/v1/maps/geocode?q=' + encodeURIComponent(q || ''), null, 20000);
+    },
+    termHosts: function () {
+      return request('GET', '/v1/term/hosts', null, 15000);
+    },
+    termExec: function (host, command, user, timeout) {
+      var body = {
+        host: host || 'local',
+        command: command || '',
+        user: user || null
+      };
+      if (timeout) body.timeout = timeout;
+      return request('POST', '/v1/term/exec', body, Math.max(20000, ((timeout || 60) + 15) * 1000));
     }
   };
 })();

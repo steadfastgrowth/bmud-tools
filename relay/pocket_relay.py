@@ -6,6 +6,7 @@ PRIVACY:
   /v1/hermes      → local hermes CLI on this Mac
   /v1/music/*     → Spotify Connect on this Mac (Hermes tokens)
   /v1/maps/*      → OpenStreetMap (Nominatim + OSRM)
+  /v1/term/*      → SSH to Tailscale hosts (Mac keys)
   other routes    → Mini bridge (Grok/Whisper)
 
   export POCKET_TOKEN=...
@@ -807,6 +808,222 @@ def maps_ready() -> tuple[bool, str | None]:
 
 
 
+# --- Terminal / SSH (any Tailscale host the Mac can reach) ---
+TAILSCALE_BIN = os.environ.get("TAILSCALE_BIN", "tailscale")
+SSH_BIN = os.environ.get("SSH_BIN", "ssh")
+TERM_DEFAULT_USER = os.environ.get("TERM_SSH_USER") or os.environ.get("USER") or "user"
+TERM_MAX_OUTPUT = int(os.environ.get("TERM_MAX_OUTPUT", "120000"))
+TERM_DEFAULT_TIMEOUT = int(os.environ.get("TERM_TIMEOUT", "60"))
+
+
+def term_hosts() -> dict:
+    """List self + peers from `tailscale status --json`."""
+    hosts = []
+    try:
+        p = subprocess.run(
+            [TAILSCALE_BIN, "status", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        if p.returncode != 0:
+            raise RuntimeError((p.stderr or p.stdout or "tailscale status failed").strip())
+        data = json.loads(p.stdout or "{}")
+    except FileNotFoundError:
+        raise RuntimeError("tailscale CLI not found on Mac")
+    except Exception as e:
+        raise RuntimeError(str(e))
+
+    def add_node(node: dict, is_self: bool = False) -> None:
+        if not node:
+            return
+        ips = node.get("TailscaleIPs") or []
+        ip4 = next((ip for ip in ips if ":" not in ip), None)
+        ip6 = next((ip for ip in ips if ":" in ip), None)
+        dns = (node.get("DNSName") or "").rstrip(".")
+        host = node.get("HostName") or (dns.split(".")[0] if dns else "")
+        online = bool(node.get("Online")) if not is_self else True
+        if is_self:
+            online = True
+        os_name = ""
+        try:
+            os_name = (node.get("OS") or "") or ""
+        except Exception:
+            pass
+        hosts.append(
+            {
+                "name": host or dns or ip4 or "node",
+                "dns": dns,
+                "ip": ip4 or ip6 or "",
+                "ips": ips,
+                "online": online,
+                "os": os_name,
+                "self": is_self,
+                "target": ip4 or dns or host,
+            }
+        )
+
+    add_node(data.get("Self") or {}, is_self=True)
+    peers = data.get("Peer") or {}
+    if isinstance(peers, dict):
+        for _k, node in peers.items():
+            add_node(node or {}, is_self=False)
+    # online first, then name
+    hosts.sort(key=lambda h: (0 if h.get("online") else 1, (h.get("name") or "").lower()))
+    return {
+        "hosts": hosts,
+        "count": len(hosts),
+        "default_user": TERM_DEFAULT_USER,
+        "provider": "tailscale+ssh",
+    }
+
+
+def _is_local_host(host: str) -> bool:
+    h = (host or "").strip().lower()
+    if h in ("local", "localhost", "127.0.0.1", "::1", "self", "this", "mac"):
+        return True
+    try:
+        st = term_hosts()
+        for node in st.get("hosts") or []:
+            if not node.get("self"):
+                continue
+            names = {
+                (node.get("name") or "").lower(),
+                (node.get("dns") or "").lower(),
+                (node.get("ip") or "").lower(),
+                (node.get("target") or "").lower(),
+            }
+            for ip in node.get("ips") or []:
+                names.add(str(ip).lower())
+            if h in names or h.rstrip(".") in names:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def term_exec(
+    host: str,
+    command: str,
+    user: str | None = None,
+    port: int | None = None,
+    timeout: int | None = None,
+) -> dict:
+    """Run a command on a Tailnet host via SSH, or locally if host is this Mac.
+
+    Local (no sshd required): host = local | localhost | self | this Mac's TS IP/name.
+    Remote: uses the Mac's SSH keys/agent (BatchMode — keys required, no password prompt).
+    """
+    host = (host or "").strip()
+    command = (command or "").strip()
+    if not host:
+        raise ValueError("host required")
+    if not command:
+        raise ValueError("command required")
+    if any(c in host for c in " ;|&$`()<>\"\'"):
+        raise ValueError("invalid host")
+    user = (user or TERM_DEFAULT_USER or "").strip() or TERM_DEFAULT_USER
+    if user and any(c in user for c in " ;|&$`()<>\"\'"):
+        raise ValueError("invalid user")
+    timeout = int(timeout or TERM_DEFAULT_TIMEOUT)
+    timeout = max(5, min(timeout, 300))
+    t0 = time.time()
+
+    # --- local shell on the relay Mac ---
+    if _is_local_host(host):
+        shell = os.environ.get("SHELL") or "/bin/zsh"
+        try:
+            p = subprocess.run(
+                [shell, "-lc", command],
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+            )
+        except subprocess.TimeoutExpired as e:
+            out = e.stdout if isinstance(e.stdout, str) else ""
+            err = e.stderr if isinstance(e.stderr, str) else "timeout"
+            return {
+                "ok": False,
+                "host": host,
+                "user": user,
+                "command": command,
+                "mode": "local",
+                "exit_code": None,
+                "stdout": (out or "")[:TERM_MAX_OUTPUT],
+                "stderr": (err or "timeout")[:8000],
+                "elapsed_s": round(time.time() - t0, 2),
+                "error": f"timeout after {timeout}s",
+            }
+        stdout = (p.stdout or "")[:TERM_MAX_OUTPUT]
+        stderr = (p.stderr or "")[:8000]
+        return {
+            "ok": p.returncode == 0,
+            "host": host,
+            "user": user,
+            "command": command,
+            "mode": "local",
+            "exit_code": p.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+            "elapsed_s": round(time.time() - t0, 2),
+            "truncated": len(p.stdout or "") > TERM_MAX_OUTPUT,
+        }
+
+    # --- remote SSH ---
+    target = f"{user}@{host}" if user else host
+    cmd = [
+        SSH_BIN,
+        "-o", "BatchMode=yes",
+        "-o", "ConnectTimeout=12",
+        "-o", "ServerAliveInterval=5",
+        "-o", "ServerAliveCountMax=2",
+        "-o", "StrictHostKeyChecking=accept-new",
+    ]
+    if port:
+        cmd.extend(["-p", str(int(port))])
+    cmd.extend([target, command])
+
+    t0 = time.time()
+    try:
+        p = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except subprocess.TimeoutExpired as e:
+        out = (e.stdout or "") if isinstance(e.stdout, str) else ""
+        err = (e.stderr or "") if isinstance(e.stderr, str) else "timeout"
+        return {
+            "ok": False,
+            "host": host,
+            "user": user,
+            "command": command,
+            "exit_code": None,
+            "stdout": (out or "")[:TERM_MAX_OUTPUT],
+            "stderr": (err or "timeout")[:8000],
+            "elapsed_s": round(time.time() - t0, 2),
+            "error": f"timeout after {timeout}s",
+        }
+    except FileNotFoundError:
+        raise RuntimeError("ssh not found on Mac")
+    stdout = (p.stdout or "")[:TERM_MAX_OUTPUT]
+    stderr = (p.stderr or "")[:8000]
+    return {
+        "ok": p.returncode == 0,
+        "host": host,
+        "user": user,
+        "command": command,
+        "mode": "ssh",
+        "exit_code": p.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "elapsed_s": round(time.time() - t0, 2),
+        "truncated": len(p.stdout or "") > TERM_MAX_OUTPUT,
+    }
+
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "PocketRelay/0.2"
 
@@ -894,6 +1111,8 @@ class Handler(BaseHTTPRequestHandler):
                     "contacts_error": _CONTACT_LOAD_ERROR,
                     "maps_ready": True,
                     "maps_provider": "osm",
+                    "term_ready": True,
+                    "term_provider": "tailscale+ssh",
                     "imsg": IMSG,
                 }
             )
@@ -950,6 +1169,18 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
             return
 
+
+
+        if path in ("/v1/term/hosts", "/v1/terminal/hosts"):
+            try:
+                self._json(200, term_hosts())
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
+        if path.startswith("/v1/term") or path.startswith("/v1/terminal"):
+            self._json(404, {"error": "not found"})
+            return
 
         if path in ("/v1/maps/search", "/v1/maps/geocode"):
             q = (qs.get("q") or qs.get("query") or [""])[0]
@@ -1092,6 +1323,24 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
             return
 
+
+
+        if path in ("/v1/term/exec", "/v1/terminal/exec", "/v1/term/run"):
+            try:
+                payload = json.loads(body.decode() or "{}")
+            except json.JSONDecodeError:
+                self._json(400, {"error": "invalid json"})
+                return
+            try:
+                host = payload.get("host") or payload.get("target") or ""
+                command = payload.get("command") or payload.get("cmd") or payload.get("q") or ""
+                user = payload.get("user")
+                port = payload.get("port")
+                timeout = payload.get("timeout")
+                self._json(200, term_exec(str(host), str(command), user, port, timeout))
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
 
         if path in ("/v1/maps/directions", "/v1/maps/route"):
             try:

@@ -159,6 +159,7 @@
     thread: 'v-thread',
     compose: 'v-compose',
     maps: 'v-maps',
+    term: 'v-term',
     music: 'v-music',
     settings: 'v-settings'
   };
@@ -171,9 +172,14 @@
     thread: 'Chat',
     compose: 'New msg',
     maps: 'Maps',
+    term: 'Terminal',
     music: 'Music',
     settings: 'Settings'
   };
+
+  var termHostsList = [];
+  var termHost = 'local';
+  var termDefaultUser = '';
 
   var mapPlaces = [];
   var mapSelected = null; // last focused/selected place
@@ -208,6 +214,13 @@
     if (name === 'maps') {
       renderMapsSaved();
       refreshMapsNow();
+    }
+    if (name === 'term') {
+      if ($('termHost') && !$('termHost').value) $('termHost').value = termHost || 'local';
+      if ($('termUser') && !$('termUser').value && termDefaultUser) $('termUser').value = termDefaultUser;
+      refreshTermHostNow();
+      if (!termHostsList.length) loadTermHosts();
+      else renderTermHosts(termHostsList);
     }
     if (name === 'music') refreshMusicDeviceHint();
     if (name === 'settings') {
@@ -270,6 +283,11 @@
       else if (id === 'btnNavHome' || id === 'btnNavWork') c = 'Go';
       else if (id === 'btnSetHome' || id === 'btnSetWork') c = 'Save';
       else c = 'Search';
+    } else if (view === 'term') {
+      if (el && el.getAttribute && el.getAttribute('data-host-i') != null) c = 'Pick';
+      else if (el && el.getAttribute && el.getAttribute('data-term-line') != null) c = 'Read';
+      else if (id === 'btnTermHosts') c = 'Hosts';
+      else c = 'Run';
     } else if (view === 'music') {
       if (el && el.getAttribute && el.getAttribute('data-track-i') != null) c = 'Play';
       else if (el && el.getAttribute && el.getAttribute('data-device-i') != null) c = 'Pick';
@@ -376,6 +394,8 @@
       case 'nav-work': navigateToSaved('work'); return true;
       case 'maps-set-home': mapsSaveSelected('home'); return true;
       case 'maps-set-work': mapsSaveSelected('work'); return true;
+      case 'term-hosts': loadTermHosts(); return true;
+      case 'term-run': termRun(); return true;
       case 'music-search': musicSearch(); return true;
       case 'music-play': playPhoneTrack(lastTrack); return true;
       case 'music-stop': stopPhoneAudio(); return true;
@@ -459,6 +479,21 @@
       if (id === 'btnSetWork') { mapsSaveSelected('work'); return; }
       if (id === 'btnMapsSearch' || id === 'mapsQ') { mapsSearch(); return; }
       mapsSearch();
+      return;
+    }
+    if (view === 'term') {
+      var hi = el.getAttribute && el.getAttribute('data-host-i');
+      if (hi != null && hi !== '') {
+        pickTermHost(termHostsList[parseInt(hi, 10)]);
+        return;
+      }
+      if (el.getAttribute && el.getAttribute('data-term-line') != null) {
+        ensureVisible(el);
+        return;
+      }
+      if (id === 'btnTermHosts') { loadTermHosts(); return; }
+      if (id === 'btnTermRun' || id === 'termCmd') { termRun(); return; }
+      termRun();
       return;
     }
     if (view === 'music') {
@@ -815,6 +850,7 @@
       if (r.spotify_ready || r.spotify_configured) bits.push('spotify');
       if (r.hermes_ready || r.hermes_configured) bits.push('hermes');
       if (r.maps_ready || r.maps_provider) bits.push('maps');
+      if (r.term_ready || r.term_provider) bits.push('term');
       if (r.contacts_loaded) bits.push(r.contacts_loaded + ' contacts');
       if (r.relay) bits.push(r.relay);
       var line = bits.join(' · ') || 'ok';
@@ -1453,6 +1489,175 @@
     });
   }
 
+  function refreshTermHostNow() {
+    var h = ($('termHost') && $('termHost').value) || termHost || 'local';
+    var u = ($('termUser') && $('termUser').value) || termDefaultUser || '';
+    if ($('termHostNow')) {
+      $('termHostNow').textContent = 'Host: ' + h + (u ? (' · user ' + u) : '');
+    }
+  }
+
+  function pickTermHost(h) {
+    if (!h) return;
+    termHost = h.target || h.ip || h.dns || h.name || 'local';
+    if (h.self) termHost = 'local';
+    if ($('termHost')) $('termHost').value = termHost;
+    if (h.self && $('termUser') && !$('termUser').value && termDefaultUser) {
+      $('termUser').value = termDefaultUser;
+    }
+    refreshTermHostNow();
+    toast((h.online || h.self ? '' : 'offline · ') + termHost);
+    log('term host ' + termHost);
+  }
+
+  function renderTermHosts(list) {
+    termHostsList = list || [];
+    var ul = $('termHosts');
+    if (!ul) return;
+    ul.innerHTML = '';
+    var i, h, li, sub;
+    for (i = 0; i < termHostsList.length && i < 20; i++) {
+      h = termHostsList[i];
+      li = document.createElement('li');
+      li.tabIndex = 0;
+      li.setAttribute('data-host-i', String(i));
+      li.innerHTML = '<div class="name"></div><span class="sub"></span>';
+      li.querySelector('.name').textContent =
+        (h.self ? '★ ' : '') + (h.name || h.dns || h.ip || 'host') +
+        (h.online || h.self ? '' : ' · off');
+      sub = (h.ip || '') + (h.dns ? (' · ' + h.dns) : '') + (h.os ? (' · ' + h.os) : '');
+      if (h.self) sub = 'this Mac (local shell, no sshd needed)';
+      li.querySelector('.sub').textContent = sub;
+      (function (host) {
+        li.onclick = function () { pickTermHost(host); };
+      })(h);
+      ul.appendChild(li);
+    }
+  }
+
+  function loadTermHosts() {
+    if (!PocketBridge.base()) {
+      toast('Set bridge in Settings');
+      return;
+    }
+    toast('Hosts…');
+    if ($('termHint')) $('termHint').textContent = 'Loading Tailscale hosts…';
+    PocketBridge.termHosts().then(function (r) {
+      termDefaultUser = (r && r.default_user) || termDefaultUser;
+      if ($('termUser') && !$('termUser').value && termDefaultUser) {
+        $('termUser').value = termDefaultUser;
+      }
+      var list = (r && r.hosts) || [];
+      renderTermHosts(list);
+      if ($('termHint')) {
+        $('termHint').textContent =
+          list.length + ' hosts · Select host · Run cmd (SSH keys on Mac)';
+      }
+      toast(list.length + ' hosts');
+      log('term hosts ' + list.length);
+      setTimeout(function () {
+        collect();
+        var i;
+        for (i = 0; i < items.length; i++) {
+          if (items[i].getAttribute && items[i].getAttribute('data-host-i') === '0') {
+            focusAt(i);
+            return;
+          }
+        }
+      }, 40);
+    }).catch(function (e) {
+      if ($('termHint')) $('termHint').textContent = String(e.message || e);
+      toast('Term: ' + (e.message || e));
+      log('term hosts fail: ' + (e.message || e), 'err');
+    });
+  }
+
+  function renderTermOutput(text, meta) {
+    if ($('termMeta')) $('termMeta').textContent = meta || '—';
+    var ul = $('termOut');
+    if (!ul) return;
+    ul.innerHTML = '';
+    var lines = String(text || '').replace(/\r\n/g, '\n').split('\n');
+    if (!lines.length || (lines.length === 1 && !lines[0])) {
+      lines = ['(no output)'];
+    }
+    // chunk long lines / cap total focusable rows
+    var chunks = [];
+    var i, line, part;
+    for (i = 0; i < lines.length && chunks.length < 80; i++) {
+      line = lines[i];
+      if (line.length <= 120) {
+        chunks.push(line);
+      } else {
+        while (line.length > 120 && chunks.length < 80) {
+          chunks.push(line.slice(0, 120));
+          line = line.slice(120);
+        }
+        if (line && chunks.length < 80) chunks.push(line);
+      }
+    }
+    if (lines.length > 80) chunks.push('… truncated …');
+    for (i = 0; i < chunks.length; i++) {
+      var li = document.createElement('li');
+      li.className = 'ai-chunk';
+      li.tabIndex = 0;
+      li.setAttribute('data-term-line', String(i));
+      li.innerHTML = '<span class="part"></span><div class="body"></div>';
+      li.querySelector('.part').textContent = String(i + 1);
+      li.querySelector('.body').textContent = chunks[i] || ' ';
+      ul.appendChild(li);
+    }
+  }
+
+  function termRun() {
+    var host = ($('termHost') && $('termHost').value || termHost || 'local').replace(/^\s+|\s+$/g, '');
+    var user = ($('termUser') && $('termUser').value || '').replace(/^\s+|\s+$/g, '');
+    var cmd = ($('termCmd') && $('termCmd').value || '').replace(/^\s+|\s+$/g, '');
+    if (!host) host = 'local';
+    if (!cmd) {
+      toast('Type a command');
+      return;
+    }
+    if (!PocketBridge.base()) {
+      toast('Set bridge in Settings');
+      return;
+    }
+    termHost = host;
+    refreshTermHostNow();
+    toast('Running…');
+    if ($('termMeta')) $('termMeta').textContent = 'Running on ' + host + '…';
+    renderTermOutput('…', 'Running…');
+    PocketBridge.termExec(host, cmd, user || null, 90).then(function (r) {
+      var out = '';
+      if (r.stdout) out += r.stdout;
+      if (r.stderr) out += (out ? '\n' : '') + r.stderr;
+      if (r.error) out += (out ? '\n' : '') + r.error;
+      var meta =
+        (r.ok ? 'ok' : 'fail') +
+        ' · exit ' + (r.exit_code != null ? r.exit_code : '?') +
+        ' · ' + (r.mode || 'ssh') +
+        ' · ' + (r.elapsed_s != null ? r.elapsed_s + 's' : '') +
+        (r.truncated ? ' · truncated' : '');
+      renderTermOutput(out || '(empty)', meta);
+      toast(r.ok ? 'Done' : ('Exit ' + r.exit_code));
+      log('term ' + host + ' ' + (r.ok ? 'ok' : 'fail'));
+      setTimeout(function () {
+        collect();
+        var i;
+        for (i = 0; i < items.length; i++) {
+          if (items[i].getAttribute && items[i].getAttribute('data-term-line') === '0') {
+            focusAt(i);
+            return;
+          }
+        }
+      }, 40);
+    }).catch(function (e) {
+      renderTermOutput(String(e.message || e), 'error');
+      toast('Term: ' + (e.message || e));
+      log('term fail: ' + (e.message || e), 'err');
+    });
+  }
+
   function setMusicNow(txt) {
     if ($('musicNow')) $('musicNow').textContent = txt || '—';
   }
@@ -1843,6 +2048,8 @@
     if ($('btnNavWork')) $('btnNavWork').onclick = function () { navigateToSaved('work'); };
     if ($('btnSetHome')) $('btnSetHome').onclick = function () { mapsSaveSelected('home'); };
     if ($('btnSetWork')) $('btnSetWork').onclick = function () { mapsSaveSelected('work'); };
+    if ($('btnTermHosts')) $('btnTermHosts').onclick = loadTermHosts;
+    if ($('btnTermRun')) $('btnTermRun').onclick = termRun;
     if ($('btnSearch')) $('btnSearch').onclick = musicSearch;
     if ($('btnStop')) $('btnStop').onclick = stopPhoneAudio;
     if ($('btnRemote')) $('btnRemote').onclick = function () { musicCtrl('play'); };

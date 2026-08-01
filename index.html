@@ -249,8 +249,9 @@
         <li tabindex="0" data-go="ai"><span class="num">2</span> AI<span class="sub">Ask / summarize your notes</span></li>
         <li tabindex="0" data-go="messages"><span class="num">3</span> Messages<span class="sub">iMessage via Mac</span></li>
         <li tabindex="0" data-go="maps"><span class="num">4</span> Maps<span class="sub">OSM search · text directions</span></li>
-        <li tabindex="0" data-go="music"><span class="num">5</span> Music<span class="sub">Search · play on phone</span></li>
-        <li tabindex="0" data-go="settings"><span class="num">6</span> Settings<span class="sub">Bridge URL + token</span></li>
+        <li tabindex="0" data-go="term"><span class="num">5</span> Terminal<span class="sub">SSH any Tailscale host</span></li>
+        <li tabindex="0" data-go="music"><span class="num">6</span> Music<span class="sub">Search · play on phone</span></li>
+        <li tabindex="0" data-go="settings"><span class="num">7</span> Settings<span class="sub">Bridge URL + token</span></li>
       </ul>
       <div class="scroll-end"></div>
     </section>
@@ -368,6 +369,29 @@
         <h2>Directions</h2>
         <div class="hint" id="mapsRouteMeta">—</div>
         <ul class="list" id="mapsSteps"></ul>
+      </div>
+      <div class="scroll-end"></div>
+    </section>
+
+    <section id="v-term" class="view">
+      <div class="card">
+        <h2>Terminal</h2>
+        <div class="hint" id="termHint">SSH via Mac · Tailscale hosts · key auth</div>
+        <button type="button" class="btn primary" id="btnTermHosts" tabindex="0" data-action="term-hosts">Refresh hosts</button>
+        <div class="now" id="termHostNow">Host: local (this Mac)</div>
+        <ul class="list" id="termHosts"></ul>
+        <label>User</label>
+        <input id="termUser" type="text" tabindex="0" placeholder="ssh user (blank = Mac default)" />
+        <label>Host override</label>
+        <input id="termHost" type="text" tabindex="0" placeholder="local or 100.x / name" />
+        <label>Command</label>
+        <textarea id="termCmd" rows="2" tabindex="0" placeholder="hostname; uptime"></textarea>
+        <button type="button" class="btn primary" id="btnTermRun" tabindex="0" data-action="term-run">Run</button>
+      </div>
+      <div class="card">
+        <h2>Output</h2>
+        <div class="hint" id="termMeta">—</div>
+        <ul class="list" id="termOut"></ul>
       </div>
       <div class="scroll-end"></div>
     </section>

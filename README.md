@@ -10,6 +10,7 @@ A [KaiOS](https://www.kaiostech.com/) flip-phone app (built for **Nokia 2780**) 
 - **Contacts** (macOS Address Book search)
 - **Music** (30s previews on the phone + Spotify Connect remote)
 - **Maps** (OpenStreetMap search + text turn-by-turn; private)
+- **Terminal** (SSH any Tailscale host via Mac keys)
 
 ```
 Nokia 2780 (B-Mud)  --HTTP/LAN-->  Mac relay :8790
@@ -99,7 +100,7 @@ curl -s http://127.0.0.1:8790/health | python3 -m json.tool
 ```
 
 See [docs/BRIDGE.md](docs/BRIDGE.md) for routes and privacy notes.
-Maps: [docs/MAPS.md](docs/MAPS.md).
+Maps: [docs/MAPS.md](docs/MAPS.md). Terminal: [docs/TERMINAL.md](docs/TERMINAL.md).
 
 ---
 
