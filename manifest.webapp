@@ -5,7 +5,7 @@
   "start_url": "/index.html",
   "display": "standalone",
   "orientation": "portrait",
-  "theme_color": "#0b1220",
+  "theme_color": "#4D8DFF",
   "background_color": "#0b1220",
   "icons": [
     {
@@ -26,9 +26,10 @@
   ],
   "b2g_features": {
     "type": "web",
-    "version": "0.7.0",
+    "version": "0.7.2",
     "developer": {
-      "name": "B-Mud Tools"
+      "name": "B-Mud",
+      "url": "https://github.com/steadfastgrowth/bmud-tools"
     },
     "permissions": {
       "systemXHR": {
@@ -41,6 +42,7 @@
     "chrome": {
       "navigation": false
     },
-    "focusable": true
+    "focusable": true,
+    "focus_color": "#4D8DFF"
   }
 }

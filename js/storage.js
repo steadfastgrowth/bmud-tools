@@ -28,20 +28,38 @@ var PocketStore = (function () {
   }
 
   function loadCfg() {
+    // Defaults are empty for public builds — set Bridge URL + token in Settings.
+    // Optional: create js/config.local.js (gitignored) to seed device defaults.
     var def = {
-      bridgeUrl: '', // e.g. http://192.168.1.10:8790 — set in Settings
-      token: '',     // shared secret with Mac relay (POCKET_TOKEN)
+      bridgeUrl: '',
+      token: '',
       aiMode: 'notes', // notes | hermes
       musicDeviceId: null,
       musicDeviceName: null
     };
     try {
+      if (typeof PocketLocalConfig === 'object' && PocketLocalConfig) {
+        if (PocketLocalConfig.bridgeUrl) def.bridgeUrl = PocketLocalConfig.bridgeUrl;
+        if (PocketLocalConfig.token) def.token = PocketLocalConfig.token;
+        if (PocketLocalConfig.aiMode) def.aiMode = PocketLocalConfig.aiMode;
+      }
+    } catch (eLoc) {}
+    try {
       var raw = localStorage.getItem(CFG);
-      if (!raw) return def;
+      if (!raw) {
+        if (def.bridgeUrl || def.token) {
+          try { localStorage.setItem(CFG, JSON.stringify(def)); } catch (e0) {}
+        }
+        return def;
+      }
       var cfg = JSON.parse(raw);
-      if (cfg.bridgeUrl == null) cfg.bridgeUrl = def.bridgeUrl;
-      if (cfg.token == null) cfg.token = def.token;
-      if (!cfg.aiMode) cfg.aiMode = def.aiMode;
+      var changed = false;
+      if (!cfg.bridgeUrl && def.bridgeUrl) { cfg.bridgeUrl = def.bridgeUrl; changed = true; }
+      if (!cfg.token && def.token) { cfg.token = def.token; changed = true; }
+      if (!cfg.aiMode) { cfg.aiMode = def.aiMode; changed = true; }
+      if (changed) {
+        try { localStorage.setItem(CFG, JSON.stringify(cfg)); } catch (e1) {}
+      }
       return cfg;
     } catch (e) { return def; }
   }

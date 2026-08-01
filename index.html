@@ -189,15 +189,38 @@
     .msg.me { background: #14301f; border-color: #2f9e6a; }
     .msg b { font-size: 10px; color: #7f93b8; text-transform: uppercase; }
 
+    /* Softkeys: L/R absolute, center filled by JS to exact bar width */
     .soft {
-      position: absolute; left: 0; right: 0; bottom: 0; height: 28px; z-index: 50;
-      background: #060a12; border-top: 1px solid #1a2744;
-      font-size: 11px; font-weight: 800; color: #9ec1ff;
-      padding: 6px 10px 0; overflow: hidden;
+      position: absolute; left: 0; right: 0; bottom: 0; z-index: 50;
+      height: 28px; width: 100%;
+      background: #060a12;
+      border-top: 1px solid #1a2744;
+      font-size: 11px; font-weight: 800;
+      overflow: hidden; margin: 0; padding: 0;
     }
-    #skL { float: left; width: 30%; color: #9ec1ff; }
-    #skC { text-align: center; color: #5ea0ff; }
-    #skR { float: right; width: 30%; text-align: right; margin-top: -14px; color: #9ec1ff; }
+    #skL, #skC, #skR {
+      position: absolute; top: 0; height: 28px; line-height: 28px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+      margin: 0; border: 0; padding: 0 6px;
+      box-sizing: border-box;
+    }
+    #skL {
+      left: 0; width: 30%;
+      text-align: left; color: #9ec1ff; z-index: 3;
+      background: #060a12;
+    }
+    #skR {
+      right: 0; width: 30%;
+      text-align: right; color: #9ec1ff; z-index: 3;
+      background: #060a12;
+    }
+    #skC {
+      left: 0; /* JS sets left+width to center text in full bar */
+      width: 100%;
+      text-align: center; color: #5ea0ff; z-index: 1;
+      padding: 0;
+    }
+
 
     #toast {
       display: none; position: absolute; left: 10%; right: 10%; bottom: 36px; z-index: 60;
@@ -349,7 +372,7 @@
         <label>Bridge URL</label>
         <input id="url" type="text" tabindex="0" placeholder="http://192.168.1.10:8790" />
         <label>Token</label>
-        <input id="token" type="text" tabindex="0" />
+        <input id="token" type="text" tabindex="0" placeholder="shared token" />
         <button type="button" class="btn primary" id="btnSaveCfg" tabindex="0">Save</button>
         <button type="button" class="btn ghost" id="btnPing" tabindex="0">Ping</button>
         <pre class="out" id="cfgOut">—</pre>
@@ -367,7 +390,11 @@
 
     <audio id="musicPlayer" preload="none"></audio>
     <div id="toast"></div>
-    <div class="soft"><span id="skL">Home</span><div id="skC">Select</div><span id="skR"></span></div>
+    <div class="soft" id="softBar">
+      <span id="skL">Home</span>
+      <span id="skC">Select</span>
+      <span id="skR"></span>
+    </div>
   </div>
 
   <script src="js/storage.js"></script>

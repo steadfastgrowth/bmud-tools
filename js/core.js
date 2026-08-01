@@ -220,6 +220,23 @@
     if (view !== 'hub') show('hub', false);
   }
 
+  /** Pin #skC to true horizontal center of the softkey bar (KaiOS CSS is flaky). */
+  function layoutSoftCenter() {
+    var bar = $('softBar') || document.querySelector('.soft');
+    var c = $('skC');
+    if (!bar || !c) return;
+    var w = bar.clientWidth || bar.offsetWidth || window.innerWidth || 240;
+    if (w < 80) w = window.innerWidth || 240;
+    c.style.position = 'absolute';
+    c.style.left = '0px';
+    c.style.right = 'auto';
+    c.style.width = w + 'px';
+    c.style.textAlign = 'center';
+    c.style.padding = '0';
+    c.style.margin = '0';
+    c.style.zIndex = '1';
+  }
+
   function setSoft() {
     if ($('skL')) $('skL').textContent = 'Home';
     if ($('skR')) $('skR').textContent = (view === 'hub' ? '' : 'Back');
@@ -264,6 +281,7 @@
     }
 
     if ($('skC')) $('skC').textContent = c;
+    layoutSoftCenter();
   }
 
   /* ===== MENU / D-PAD ===== */
@@ -1530,7 +1548,7 @@
   }
 
   function boot() {
-    // Bridge URL + token are set in Settings (no baked-in secrets for public builds)
+    // loadCfg() seeds from optional PocketLocalConfig / localStorage
     document.addEventListener('keydown', onKeyDown, true);
     // ignore keyup for STT (toggle on down only)
     document.addEventListener('keyup', function (e) {
@@ -1544,6 +1562,10 @@
     syncAiModeUi();
     refreshMusicDeviceHint();
     if ($('verLine')) $('verLine').textContent = 'B-Mud v' + (PocketStore.APP_VERSION || '0.7.0');
+    layoutSoftCenter();
+    setTimeout(layoutSoftCenter, 50);
+    setTimeout(layoutSoftCenter, 300);
+    window.addEventListener('resize', layoutSoftCenter, false);
 
     // Restore last screen if recent (< 24h) and not hub-only stack mess
     var sess = PocketStore.loadSession();

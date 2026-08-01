@@ -30,3 +30,7 @@ venv/
 # Local experiment / private notes
 private/
 .local/
+
+# Personal device secrets (not for public)
+js/config.local.js
+config.local.js

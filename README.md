@@ -113,6 +113,20 @@ See [docs/BRIDGE.md](docs/BRIDGE.md) for routes and privacy notes.
 
 ---
 
+## Personal device defaults (optional)
+
+Create `js/config.local.js` (gitignored) on your machine to seed Settings:
+
+```js
+var PocketLocalConfig = {
+  bridgeUrl: 'http://192.168.1.10:8790',
+  token: 'your-shared-secret',
+  aiMode: 'notes'
+};
+```
+
+Then load it **before** `storage.js` in your private deploy package (do not commit this file).
+
 ## Security
 
 - **No tokens or API keys ship in this repo.** Set your own.
