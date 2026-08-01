@@ -6,7 +6,8 @@ var PocketStore = (function () {
   var RECENTS = 'pocket.recents.v1';
   var LOG = 'pocket.log.v1';
   var PLACES = 'pocket.places.v1';
-  var APP_VERSION = '0.9.0';
+  var APP_VERSION = '0.10.0';
+  var PODCASTS = 'pocket.podcasts.v1';
 
   function loadNotes() {
     try { return JSON.parse(localStorage.getItem(KEY) || '[]'); } catch (e) { return []; }
@@ -161,6 +162,27 @@ var PocketStore = (function () {
     return loadPlaces().favorites || [];
   }
 
+  function loadPodcastSubs() {
+    try { return JSON.parse(localStorage.getItem(PODCASTS) || '[]'); } catch (e) { return []; }
+  }
+  function savePodcastSubs(list) {
+    try { localStorage.setItem(PODCASTS, JSON.stringify(list || [])); } catch (e) {}
+  }
+  function addPodcastSub(feed) {
+    if (!feed || !feed.url) return;
+    var list = loadPodcastSubs().filter(function (f) { return f.url !== feed.url; });
+    list.unshift({
+      title: feed.title || 'Podcast',
+      author: feed.author || '',
+      url: feed.url
+    });
+    if (list.length > 40) list = list.slice(0, 40);
+    savePodcastSubs(list);
+  }
+  function removePodcastSub(url) {
+    savePodcastSubs(loadPodcastSubs().filter(function (f) { return f.url !== url; }));
+  }
+
   return {
     APP_VERSION: APP_VERSION,
     loadNotes: loadNotes,
@@ -179,6 +201,10 @@ var PocketStore = (function () {
     savePlaces: savePlaces,
     getPlace: getPlace,
     setPlace: setPlace,
-    loadFavorites: loadFavorites
+    loadFavorites: loadFavorites,
+    loadPodcastSubs: loadPodcastSubs,
+    savePodcastSubs: savePodcastSubs,
+    addPodcastSub: addPodcastSub,
+    removePodcastSub: removePodcastSub
   };
 })();

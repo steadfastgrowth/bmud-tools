@@ -160,6 +160,7 @@
     compose: 'v-compose',
     maps: 'v-maps',
     term: 'v-term',
+    podcasts: 'v-podcasts',
     music: 'v-music',
     settings: 'v-settings'
   };
@@ -173,9 +174,16 @@
     compose: 'New msg',
     maps: 'Maps',
     term: 'Terminal',
+    podcasts: 'Podcasts',
     music: 'Music',
     settings: 'Settings'
   };
+
+  var podCatalog = [];
+  var podFeedList = [];
+  var podEpisodes = [];
+  var podCurrentFeed = null;
+  var podPlaying = false;
 
   var termHostsList = [];
   var termHost = 'local';
@@ -221,6 +229,11 @@
       refreshTermHostNow();
       if (!termHostsList.length) loadTermHosts();
       else renderTermHosts(termHostsList);
+    }
+    if (name === 'podcasts') {
+      if (!podCatalog.length) loadPodCatalog();
+      else renderPodFeeds(podCatalog, 'catalog');
+      renderPodSubsHint();
     }
     if (name === 'music') refreshMusicDeviceHint();
     if (name === 'settings') {
@@ -288,6 +301,14 @@
       else if (el && el.getAttribute && el.getAttribute('data-term-line') != null) c = 'Read';
       else if (id === 'btnTermHosts') c = 'Hosts';
       else c = 'Run';
+    } else if (view === 'podcasts') {
+      if (el && el.getAttribute && el.getAttribute('data-ep-i') != null) c = 'Play';
+      else if (el && el.getAttribute && el.getAttribute('data-feed-i') != null) c = 'Open';
+      else if (id === 'btnPodStop') c = 'Stop';
+      else if (id === 'btnPodSubscribe') c = 'Sub';
+      else if (id === 'btnPodCatalog') c = 'Browse';
+      else if (id === 'btnPodSubs') c = 'Subs';
+      else c = 'Open';
     } else if (view === 'music') {
       if (el && el.getAttribute && el.getAttribute('data-track-i') != null) c = 'Play';
       else if (el && el.getAttribute && el.getAttribute('data-device-i') != null) c = 'Pick';
@@ -396,6 +417,11 @@
       case 'maps-set-work': mapsSaveSelected('work'); return true;
       case 'term-hosts': loadTermHosts(); return true;
       case 'term-run': termRun(); return true;
+      case 'pod-catalog': loadPodCatalog(); return true;
+      case 'pod-subs': showPodSubs(); return true;
+      case 'pod-open-feed': openPodFeedUrl(); return true;
+      case 'pod-stop': stopPodcast(); return true;
+      case 'pod-sub': subscribeCurrentPod(); return true;
       case 'music-search': musicSearch(); return true;
       case 'music-play': playPhoneTrack(lastTrack); return true;
       case 'music-stop': stopPhoneAudio(); return true;
@@ -494,6 +520,25 @@
       if (id === 'btnTermHosts') { loadTermHosts(); return; }
       if (id === 'btnTermRun' || id === 'termCmd') { termRun(); return; }
       termRun();
+      return;
+    }
+    if (view === 'podcasts') {
+      var fi = el.getAttribute && el.getAttribute('data-feed-i');
+      if (fi != null && fi !== '') {
+        openPodFeed(podFeedList[parseInt(fi, 10)]);
+        return;
+      }
+      var ei = el.getAttribute && el.getAttribute('data-ep-i');
+      if (ei != null && ei !== '') {
+        playPodcastEpisode(podEpisodes[parseInt(ei, 10)]);
+        return;
+      }
+      if (id === 'btnPodCatalog') { loadPodCatalog(); return; }
+      if (id === 'btnPodSubs') { showPodSubs(); return; }
+      if (id === 'btnPodOpenFeed' || id === 'podFeedUrl') { openPodFeedUrl(); return; }
+      if (id === 'btnPodStop') { stopPodcast(); return; }
+      if (id === 'btnPodSubscribe') { subscribeCurrentPod(); return; }
+      loadPodCatalog();
       return;
     }
     if (view === 'music') {
@@ -851,6 +896,7 @@
       if (r.hermes_ready || r.hermes_configured) bits.push('hermes');
       if (r.maps_ready || r.maps_provider) bits.push('maps');
       if (r.term_ready || r.term_provider) bits.push('term');
+      if (r.podcasts_ready || r.podcasts_provider) bits.push('podcasts');
       if (r.contacts_loaded) bits.push(r.contacts_loaded + ' contacts');
       if (r.relay) bits.push(r.relay);
       var line = bits.join(' · ') || 'ok';
@@ -1658,6 +1704,237 @@
     });
   }
 
+  function setPodNow(txt) {
+    if ($('podNow')) $('podNow').textContent = txt || '—';
+  }
+
+  function renderPodSubsHint() {
+    var n = (PocketStore.loadPodcastSubs() || []).length;
+    if ($('podHint')) {
+      $('podHint').textContent = 'Free public RSS · ' + n + ' subscription' + (n === 1 ? '' : 's');
+    }
+  }
+
+  function renderPodFeeds(list, mode) {
+    podFeedList = list || [];
+    var ul = $('podFeeds');
+    if (!ul) return;
+    ul.innerHTML = '';
+    var i, f, li;
+    for (i = 0; i < podFeedList.length && i < 30; i++) {
+      f = podFeedList[i];
+      li = document.createElement('li');
+      li.tabIndex = 0;
+      li.setAttribute('data-feed-i', String(i));
+      li.innerHTML = '<div class="name"></div><span class="sub"></span>';
+      li.querySelector('.name').textContent = f.title || 'Podcast';
+      li.querySelector('.sub').textContent = (f.author || mode || '') + (f.url ? '' : '');
+      if (f.author) li.querySelector('.sub').textContent = f.author;
+      else li.querySelector('.sub').textContent = (f.url || '').slice(0, 50);
+      (function (feed) {
+        li.onclick = function () { openPodFeed(feed); };
+      })(f);
+      ul.appendChild(li);
+    }
+  }
+
+  function renderPodEpisodes(eps, show) {
+    podEpisodes = eps || [];
+    var ul = $('podEpisodes');
+    if (!ul) return;
+    ul.innerHTML = '';
+    if ($('podShowTitle')) $('podShowTitle').textContent = (show && show.title) || 'Episodes';
+    if ($('podShowMeta')) {
+      $('podShowMeta').textContent = show
+        ? ((show.count || podEpisodes.length) + ' eps · Select to play')
+        : 'Pick a show';
+    }
+    var i, e, li;
+    for (i = 0; i < podEpisodes.length && i < 25; i++) {
+      e = podEpisodes[i];
+      li = document.createElement('li');
+      li.tabIndex = 0;
+      li.setAttribute('data-ep-i', String(i));
+      li.innerHTML = '<div class="name"></div><span class="sub"></span>';
+      li.querySelector('.name').textContent = (i + 1) + '. ' + (e.title || 'Episode');
+      li.querySelector('.sub').textContent =
+        (e.pub_date || '').slice(0, 22) + (e.duration ? (' · ' + e.duration) : '');
+      (function (ep) {
+        li.onclick = function () { playPodcastEpisode(ep); };
+      })(e);
+      ul.appendChild(li);
+    }
+  }
+
+  function loadPodCatalog() {
+    if (!PocketBridge.base()) {
+      toast('Set bridge in Settings');
+      return;
+    }
+    toast('Catalog…');
+    setPodNow('Loading free shows…');
+    PocketBridge.podcastsCatalog().then(function (r) {
+      podCatalog = (r && r.feeds) || [];
+      renderPodFeeds(podCatalog, 'catalog');
+      setPodNow(podCatalog.length + ' free shows · Select to open');
+      toast(podCatalog.length + ' shows');
+      log('pod catalog');
+      setTimeout(function () {
+        collect();
+        var i;
+        for (i = 0; i < items.length; i++) {
+          if (items[i].getAttribute && items[i].getAttribute('data-feed-i') === '0') {
+            focusAt(i);
+            return;
+          }
+        }
+      }, 40);
+    }).catch(function (e) {
+      setPodNow(String(e.message || e));
+      toast('Podcasts: ' + (e.message || e));
+    });
+  }
+
+  function showPodSubs() {
+    var subs = PocketStore.loadPodcastSubs() || [];
+    renderPodFeeds(subs, 'subs');
+    setPodNow(subs.length ? (subs.length + ' subscriptions') : 'No subs yet — open a show & Subscribe');
+    toast(subs.length ? (subs.length + ' subs') : 'No subs');
+    renderPodSubsHint();
+  }
+
+  function openPodFeedUrl() {
+    var url = ($('podFeedUrl') && $('podFeedUrl').value || '').replace(/^\s+|\s+$/g, '');
+    if (!url) {
+      toast('Paste a feed URL');
+      return;
+    }
+    openPodFeed({ title: 'Custom feed', url: url });
+  }
+
+  function openPodFeed(feed) {
+    if (!feed || !feed.url) {
+      toast('No feed URL');
+      return;
+    }
+    if (!PocketBridge.base()) {
+      toast('Set bridge in Settings');
+      return;
+    }
+    toast('Loading feed…');
+    setPodNow('Fetching RSS…');
+    if ($('podShowMeta')) $('podShowMeta').textContent = 'Loading…';
+    PocketBridge.podcastsFeed(feed.url, 20).then(function (r) {
+      podCurrentFeed = {
+        title: (r && r.title) || feed.title || 'Podcast',
+        author: (r && r.author) || feed.author || '',
+        url: feed.url || (r && r.feed_url) || '',
+        description: (r && r.description) || ''
+      };
+      if ($('podFeedUrl')) $('podFeedUrl').value = podCurrentFeed.url;
+      renderPodEpisodes((r && r.episodes) || [], r || podCurrentFeed);
+      setPodNow(podCurrentFeed.title + ' · ' + ((r && r.count) || 0) + ' episodes');
+      toast(((r && r.count) || 0) + ' episodes');
+      log('pod feed ' + podCurrentFeed.title);
+      setTimeout(function () {
+        collect();
+        var i;
+        for (i = 0; i < items.length; i++) {
+          if (items[i].getAttribute && items[i].getAttribute('data-ep-i') === '0') {
+            focusAt(i);
+            return;
+          }
+        }
+      }, 40);
+    }).catch(function (e) {
+      setPodNow(String(e.message || e));
+      toast('Feed: ' + (e.message || e));
+      log('pod feed fail: ' + (e.message || e), 'err');
+    });
+  }
+
+  function subscribeCurrentPod() {
+    if (!podCurrentFeed || !podCurrentFeed.url) {
+      toast('Open a feed first');
+      return;
+    }
+    PocketStore.addPodcastSub(podCurrentFeed);
+    renderPodSubsHint();
+    toast('Subscribed');
+    log('pod sub ' + podCurrentFeed.title);
+  }
+
+  function stopPodcast() {
+    var a = $('podPlayer');
+    if (a) {
+      try { a.pause(); } catch (e) {}
+      try { a.removeAttribute('src'); a.load(); } catch (e2) {}
+    }
+    podPlaying = false;
+    setPodNow('Stopped');
+    toast('Stopped');
+  }
+
+  function playPodcastEpisode(ep) {
+    if (!ep || !ep.audio_url) {
+      toast('No audio');
+      return;
+    }
+    var a = $('podPlayer');
+    if (!a) {
+      toast('No player');
+      return;
+    }
+    // Prefer Mac proxy so tracking redirects / UA issues don't break KaiOS
+    var url = ep.audio_url;
+    try {
+      if (PocketBridge.base()) url = PocketBridge.podcastsProxyUrl(ep.audio_url);
+    } catch (e0) {}
+    setPodNow('▶ ' + (ep.title || 'Episode'));
+    toast('Playing…');
+    try {
+      // pause music player if active
+      stopPhoneAudioQuiet();
+      a.pause();
+      a.src = url;
+      a.load();
+      var p = a.play();
+      podPlaying = true;
+      if (p && p.then) {
+        p.then(function () {
+          podPlaying = true;
+          toast('Playing');
+          log('pod play ' + (ep.title || ''));
+        }).catch(function (err) {
+          // fallback: try direct URL
+          if (url !== ep.audio_url) {
+            a.src = ep.audio_url;
+            a.load();
+            var p2 = a.play();
+            if (p2 && p2.then) {
+              p2.then(function () { toast('Playing (direct)'); }).catch(function (e2) {
+                podPlaying = false;
+                toast(String(e2.message || e2 || err.message || err));
+              });
+              return;
+            }
+          }
+          podPlaying = false;
+          toast(String(err.message || err));
+        });
+      }
+    } catch (e) {
+      podPlaying = false;
+      toast(String(e.message || e));
+    }
+  }
+
+  function stopPhoneAudioQuiet() {
+    var a = $('musicPlayer');
+    if (!a) return;
+    try { a.pause(); } catch (e) {}
+  }
+
   function setMusicNow(txt) {
     if ($('musicNow')) $('musicNow').textContent = txt || '—';
   }
@@ -2050,6 +2327,11 @@
     if ($('btnSetWork')) $('btnSetWork').onclick = function () { mapsSaveSelected('work'); };
     if ($('btnTermHosts')) $('btnTermHosts').onclick = loadTermHosts;
     if ($('btnTermRun')) $('btnTermRun').onclick = termRun;
+    if ($('btnPodCatalog')) $('btnPodCatalog').onclick = loadPodCatalog;
+    if ($('btnPodSubs')) $('btnPodSubs').onclick = showPodSubs;
+    if ($('btnPodOpenFeed')) $('btnPodOpenFeed').onclick = openPodFeedUrl;
+    if ($('btnPodStop')) $('btnPodStop').onclick = stopPodcast;
+    if ($('btnPodSubscribe')) $('btnPodSubscribe').onclick = subscribeCurrentPod;
     if ($('btnSearch')) $('btnSearch').onclick = musicSearch;
     if ($('btnStop')) $('btnStop').onclick = stopPhoneAudio;
     if ($('btnRemote')) $('btnRemote').onclick = function () { musicCtrl('play'); };
@@ -2070,6 +2352,19 @@
         phonePlaying = false;
         setMusicNow('Audio error');
         toast('Audio error');
+      });
+    }
+    var pod = $('podPlayer');
+    if (pod) {
+      pod.addEventListener('ended', function () {
+        podPlaying = false;
+        setPodNow('Episode ended');
+        toast('Ended');
+      });
+      pod.addEventListener('error', function () {
+        podPlaying = false;
+        setPodNow('Audio error');
+        toast('Podcast audio error');
       });
     }
 

@@ -250,8 +250,9 @@
         <li tabindex="0" data-go="messages"><span class="num">3</span> Messages<span class="sub">iMessage via Mac</span></li>
         <li tabindex="0" data-go="maps"><span class="num">4</span> Maps<span class="sub">OSM search · text directions</span></li>
         <li tabindex="0" data-go="term"><span class="num">5</span> Terminal<span class="sub">SSH any Tailscale host</span></li>
-        <li tabindex="0" data-go="music"><span class="num">6</span> Music<span class="sub">Search · play on phone</span></li>
-        <li tabindex="0" data-go="settings"><span class="num">7</span> Settings<span class="sub">Bridge URL + token</span></li>
+        <li tabindex="0" data-go="podcasts"><span class="num">6</span> Podcasts<span class="sub">Free RSS · play on phone</span></li>
+        <li tabindex="0" data-go="music"><span class="num">7</span> Music<span class="sub">Search · play on phone</span></li>
+        <li tabindex="0" data-go="settings"><span class="num">8</span> Settings<span class="sub">Bridge URL + token</span></li>
       </ul>
       <div class="scroll-end"></div>
     </section>
@@ -396,6 +397,30 @@
       <div class="scroll-end"></div>
     </section>
 
+    <section id="v-podcasts" class="view">
+      <div class="card">
+        <h2>Podcasts</h2>
+        <div class="hint" id="podHint">Free public RSS · no store · no account</div>
+        <button type="button" class="btn primary" id="btnPodCatalog" tabindex="0" data-action="pod-catalog">Browse free shows</button>
+        <button type="button" class="btn ghost" id="btnPodSubs" tabindex="0" data-action="pod-subs">My subscriptions</button>
+        <label>Custom feed URL</label>
+        <input id="podFeedUrl" type="text" tabindex="0" placeholder="https://…/podcast.xml" />
+        <button type="button" class="btn primary" id="btnPodOpenFeed" tabindex="0" data-action="pod-open-feed">Open feed</button>
+        <div class="now" id="podNow">—</div>
+        <ul class="list" id="podFeeds"></ul>
+      </div>
+      <div class="card">
+        <h2 id="podShowTitle">Episodes</h2>
+        <div class="hint" id="podShowMeta">Pick a show</div>
+        <div class="row">
+          <button type="button" class="btn" id="btnPodStop" tabindex="0" data-action="pod-stop">Stop</button>
+          <button type="button" class="btn ghost" id="btnPodSubscribe" tabindex="0" data-action="pod-sub">Subscribe</button>
+        </div>
+        <ul class="list" id="podEpisodes"></ul>
+      </div>
+      <div class="scroll-end"></div>
+    </section>
+
     <section id="v-music" class="view">
       <div class="card">
         <h2>Music</h2>
@@ -445,6 +470,7 @@
     </section>
 
     <audio id="musicPlayer" preload="none"></audio>
+    <audio id="podPlayer" preload="none"></audio>
     <div id="toast"></div>
     <div class="soft" id="softBar">
       <span id="skL">Home</span>

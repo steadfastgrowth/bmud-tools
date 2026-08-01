@@ -7,6 +7,7 @@ PRIVACY:
   /v1/music/*     → Spotify Connect on this Mac (Hermes tokens)
   /v1/maps/*      → OpenStreetMap (Nominatim + OSRM)
   /v1/term/*      → SSH to Tailscale hosts (Mac keys)
+  /v1/podcasts/*  → free RSS podcast feeds + optional audio proxy
   other routes    → Mini bridge (Grok/Whisper)
 
   export POCKET_TOKEN=...
@@ -1024,6 +1025,172 @@ def term_exec(
 
 
 
+# --- Podcasts (free RSS / enclosures) ---
+import xml.etree.ElementTree as ET
+
+PODCAST_UA = os.environ.get("PODCAST_USER_AGENT", "B-MudTools/0.9 (KaiOS; personal podcast client)")
+PODCAST_MAX_EPISODES = int(os.environ.get("PODCAST_MAX_EPISODES", "30"))
+
+# Curated free public RSS feeds (no login)
+PODCAST_CATALOG = [
+    {"id": "planet-money", "title": "Planet Money", "author": "NPR",
+     "url": "https://feeds.npr.org/510289/podcast.xml"},
+    {"id": "npr-news-now", "title": "NPR News Now", "author": "NPR",
+     "url": "https://feeds.npr.org/500005/podcast.xml"},
+    {"id": "up-first", "title": "Up First", "author": "NPR",
+     "url": "https://feeds.npr.org/510318/podcast.xml"},
+    {"id": "ted-talks-daily", "title": "TED Talks Daily", "author": "TED",
+     "url": "https://feeds.feedburner.com/TEDTalks_audio"},
+    {"id": "freakonomics", "title": "Freakonomics Radio", "author": "Freakonomics",
+     "url": "https://feeds.simplecast.com/Y8lFbOT4"},
+    {"id": "reply-all", "title": "Reply All (archive)", "author": "Gimlet",
+     "url": "https://feeds.simplecast.com/4T39_jAj"},
+    {"id": "this-american-life", "title": "This American Life", "author": "TAL",
+     "url": "https://www.thisamericanlife.org/podcast/rss.xml"},
+    {"id": "99pi", "title": "99% Invisible", "author": "Roman Mars",
+     "url": "https://feeds.simplecast.com/BqbsxVfO"},
+]
+
+
+def _strip_html(s: str) -> str:
+    s = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", s or "")
+    s = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", s)
+    s = re.sub(r"(?s)<[^>]+>", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _xml_text(el: ET.Element | None) -> str:
+    if el is None:
+        return ""
+    return (el.text or "").strip()
+
+
+def _find_text(parent: ET.Element, names: list[str]) -> str:
+    for n in names:
+        el = parent.find(n)
+        if el is not None and (el.text or "").strip():
+            return (el.text or "").strip()
+        # namespaced tag endswith
+        for child in parent:
+            tag = child.tag.split("}")[-1] if isinstance(child.tag, str) else ""
+            if tag == n and (child.text or "").strip():
+                return (child.text or "").strip()
+    return ""
+
+
+def podcasts_catalog() -> dict:
+    return {"feeds": PODCAST_CATALOG, "count": len(PODCAST_CATALOG), "provider": "rss"}
+
+
+def podcasts_parse_feed(feed_url: str, limit: int | None = None) -> dict:
+    feed_url = (feed_url or "").strip()
+    if not feed_url.startswith("http://") and not feed_url.startswith("https://"):
+        raise ValueError("feed url must be http(s)")
+    limit = int(limit or PODCAST_MAX_EPISODES)
+    limit = max(1, min(limit, 50))
+    req = urllib.request.Request(
+        feed_url,
+        headers={"User-Agent": PODCAST_UA, "Accept": "application/rss+xml, application/xml, text/xml, */*"},
+    )
+    with urllib.request.urlopen(req, timeout=25) as resp:
+        raw = resp.read()
+        final_url = resp.geturl()
+    # strip default ns for easier parsing
+    root = ET.fromstring(raw)
+    channel = root.find("channel")
+    if channel is None:
+        # sometimes namespaced
+        for el in root.iter():
+            if isinstance(el.tag, str) and el.tag.endswith("channel"):
+                channel = el
+                break
+    if channel is None:
+        raise RuntimeError("not a valid RSS podcast feed")
+
+    title = _find_text(channel, ["title"]) or "Podcast"
+    desc = _strip_html(_find_text(channel, ["description", "summary"]))
+    author = _find_text(channel, ["author", "creator"]) or ""
+    link = _find_text(channel, ["link"]) or final_url
+
+    items = []
+    for child in list(channel):
+        tag = child.tag.split("}")[-1] if isinstance(child.tag, str) else ""
+        if tag != "item":
+            continue
+        it_title = _find_text(child, ["title"]) or "Episode"
+        it_desc = _strip_html(_find_text(child, ["description", "summary", "subtitle"]))
+        pub = _find_text(child, ["pubDate", "date"])
+        duration = _find_text(child, ["duration"])
+        # enclosure
+        enc_url = ""
+        enc_type = ""
+        enc_len = 0
+        for enc in child:
+            et = enc.tag.split("}")[-1] if isinstance(enc.tag, str) else ""
+            if et == "enclosure":
+                enc_url = enc.attrib.get("url") or ""
+                enc_type = enc.attrib.get("type") or ""
+                try:
+                    enc_len = int(enc.attrib.get("length") or 0)
+                except ValueError:
+                    enc_len = 0
+                break
+        if not enc_url:
+            # media:content
+            for enc in child:
+                et = enc.tag.split("}")[-1] if isinstance(enc.tag, str) else ""
+                if et == "content" and enc.attrib.get("url"):
+                    enc_url = enc.attrib.get("url") or ""
+                    enc_type = enc.attrib.get("type") or "audio/mpeg"
+                    break
+        if not enc_url:
+            continue
+        items.append(
+            {
+                "title": it_title,
+                "description": it_desc[:500],
+                "pub_date": pub,
+                "duration": duration,
+                "audio_url": enc_url,
+                "audio_type": enc_type or "audio/mpeg",
+                "audio_bytes": enc_len,
+            }
+        )
+        if len(items) >= limit:
+            break
+
+    return {
+        "title": title,
+        "description": desc[:800],
+        "author": author,
+        "link": link,
+        "feed_url": feed_url,
+        "episodes": items,
+        "count": len(items),
+        "provider": "rss",
+    }
+
+
+def podcasts_proxy_headers(audio_url: str) -> tuple[str, dict[str, str]]:
+    """HEAD/GET probe for content-type (not full body)."""
+    audio_url = (audio_url or "").strip()
+    if not audio_url.startswith("http"):
+        raise ValueError("invalid audio url")
+    req = urllib.request.Request(
+        audio_url,
+        method="HEAD",
+        headers={"User-Agent": PODCAST_UA},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            ctype = resp.headers.get("Content-Type") or "audio/mpeg"
+            return resp.geturl(), {"Content-Type": ctype, "Content-Length": resp.headers.get("Content-Length") or ""}
+    except Exception:
+        return audio_url, {"Content-Type": "audio/mpeg"}
+
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "PocketRelay/0.2"
 
@@ -1033,6 +1200,14 @@ class Handler(BaseHTTPRequestHandler):
     def _auth_ok(self) -> bool:
         if self.path.startswith("/health"):
             return True
+        # audio <audio src> cannot set headers — allow token query on podcast proxy only
+        if "/v1/podcasts/proxy" in (self.path or "") and TOKEN:
+            try:
+                q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+                if (q.get("token") or [""])[0] == TOKEN:
+                    return True
+            except Exception:
+                pass
         auth = self.headers.get("Authorization", "")
         tok = self.headers.get("X-Pocket-Token", "")
         return auth == f"Bearer {TOKEN}" or tok == TOKEN
@@ -1113,6 +1288,8 @@ class Handler(BaseHTTPRequestHandler):
                     "maps_provider": "osm",
                     "term_ready": True,
                     "term_provider": "tailscale+ssh",
+                    "podcasts_ready": True,
+                    "podcasts_provider": "rss",
                     "imsg": IMSG,
                 }
             )
@@ -1170,6 +1347,63 @@ class Handler(BaseHTTPRequestHandler):
             return
 
 
+
+
+        if path in ("/v1/podcasts/catalog", "/v1/podcasts/feeds"):
+            self._json(200, podcasts_catalog())
+            return
+
+        if path in ("/v1/podcasts/feed", "/v1/podcasts/episodes"):
+            url = (qs.get("url") or qs.get("feed") or [""])[0]
+            if not url:
+                self._json(400, {"error": "url required"})
+                return
+            try:
+                limit = int((qs.get("limit") or [str(PODCAST_MAX_EPISODES)])[0])
+            except ValueError:
+                limit = PODCAST_MAX_EPISODES
+            try:
+                self._json(200, podcasts_parse_feed(url, limit))
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
+        if path == "/v1/podcasts/proxy":
+            # Stream audio through the Mac (chunked; helps tracking redirects / UA issues)
+            audio_url = (qs.get("url") or [""])[0]
+            if not audio_url.startswith("http"):
+                self._json(400, {"error": "url required"})
+                return
+            try:
+                req = urllib.request.Request(
+                    audio_url,
+                    headers={"User-Agent": PODCAST_UA, "Accept": "*/*"},
+                )
+                with urllib.request.urlopen(req, timeout=120) as resp:
+                    ctype = resp.headers.get("Content-Type") or "audio/mpeg"
+                    clen = resp.headers.get("Content-Length")
+                    self.send_response(200)
+                    self.send_header("Content-Type", ctype)
+                    if clen:
+                        self.send_header("Content-Length", clen)
+                    self.send_header("Access-Control-Allow-Origin", "*")
+                    self.send_header("Cache-Control", "private, max-age=600")
+                    self.end_headers()
+                    while True:
+                        chunk = resp.read(64 * 1024)
+                        if not chunk:
+                            break
+                        self.wfile.write(chunk)
+            except Exception as e:
+                try:
+                    self._json(502, {"error": str(e)})
+                except Exception:
+                    pass
+            return
+
+        if path.startswith("/v1/podcasts"):
+            self._json(404, {"error": "not found"})
+            return
 
         if path in ("/v1/term/hosts", "/v1/terminal/hosts"):
             try:

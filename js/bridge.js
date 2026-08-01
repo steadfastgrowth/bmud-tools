@@ -179,6 +179,22 @@ var PocketBridge = (function () {
       };
       if (timeout) body.timeout = timeout;
       return request('POST', '/v1/term/exec', body, Math.max(20000, ((timeout || 60) + 15) * 1000));
+    },
+    podcastsCatalog: function () {
+      return request('GET', '/v1/podcasts/catalog', null, 15000);
+    },
+    podcastsFeed: function (feedUrl, limit) {
+      var path = '/v1/podcasts/feed?limit=' + encodeURIComponent(limit || 20) +
+        '&url=' + encodeURIComponent(feedUrl || '');
+      return request('GET', path, null, 35000);
+    },
+    podcastsProxyUrl: function (audioUrl) {
+      var b = base();
+      if (!b || !audioUrl) return audioUrl || '';
+      var t = (cfg().token || '');
+      var path = '/v1/podcasts/proxy?url=' + encodeURIComponent(audioUrl);
+      if (t) path += '&token=' + encodeURIComponent(t);
+      return b + path;
     }
   };
 })();
