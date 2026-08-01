@@ -1,0 +1,32 @@
+# OS / editor
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+*.log
+
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+adbkey
+adbkey.pub
+
+# Build artifacts
+dist/
+*.kaios.zip
+bmud-*.zip
+/tmp/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Local experiment / private notes
+private/
+.local/

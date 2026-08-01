@@ -1,0 +1,46 @@
+{
+  "name": "B-Mud Tools",
+  "short_name": "B-Mud",
+  "description": "B-Mud Tools - dumb backwards, smart bridge",
+  "start_url": "/index.html",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#0b1220",
+  "background_color": "#0b1220",
+  "icons": [
+    {
+      "src": "icons/icon-56.png",
+      "sizes": "56x56",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/icon-112.png",
+      "sizes": "112x112",
+      "type": "image/png"
+    },
+    {
+      "src": "icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    }
+  ],
+  "b2g_features": {
+    "type": "web",
+    "version": "0.7.0",
+    "developer": {
+      "name": "B-Mud Tools"
+    },
+    "permissions": {
+      "systemXHR": {
+        "description": "Call local bridge"
+      },
+      "audio-channel-content": {
+        "description": "Play music previews on handset"
+      }
+    },
+    "chrome": {
+      "navigation": false
+    },
+    "focusable": true
+  }
+}

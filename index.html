@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <title>B-Mud Tools</title>
+  <style>
+    /* KaiOS flip — fixed header + softkeys, absolute middle scroller only */
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0; width: 100%; height: 100%;
+      background: #070b14; color: #eef3ff;
+      font-family: "Open Sans", "Segoe UI", system-ui, sans-serif;
+      font-size: 13px;
+      overflow: hidden;
+    }
+    #app {
+      position: absolute; top: 0; left: 0; right: 0; bottom: 0;
+      overflow: hidden; background: #070b14;
+    }
+
+    /* Header */
+    .top {
+      position: absolute; top: 0; left: 0; right: 0; height: 28px; z-index: 20;
+      padding: 5px 8px 0;
+      background: linear-gradient(180deg, #152238 0%, #0d1526 100%);
+      border-bottom: 1px solid #1e2f4d;
+      overflow: hidden;
+    }
+    .top b {
+      font-size: 13px; font-weight: 800; letter-spacing: 0.02em;
+      color: #f2f6ff;
+    }
+    #status {
+      float: right; margin-top: 1px;
+      font-size: 10px; font-weight: 700; letter-spacing: 0.04em;
+      text-transform: uppercase; color: #7f93b8;
+    }
+    #status.on { color: #3ddc97; }
+    #status.off { color: #ff7a88; }
+    #caps {
+      position: absolute; top: 28px; left: 0; right: 0; z-index: 18;
+      height: 16px; padding: 1px 8px 0;
+      font-size: 9px; font-weight: 700; letter-spacing: 0.03em;
+      color: #6b82a8; background: #0a1220;
+      border-bottom: 1px solid #152038;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    #caps.ok { color: #5ddea0; }
+    #caps.err { color: #ff8a96; }
+
+    #banner {
+      display: none; position: absolute; top: 44px; left: 0; right: 0; z-index: 19;
+      text-align: center; font-weight: 800; font-size: 11px; padding: 5px 6px;
+      background: #8b2218; color: #fff;
+    }
+    #banner.show { display: block; }
+
+    /* Scroll region */
+    .view {
+      display: none;
+      position: absolute;
+      top: 44px; bottom: 28px; left: 0; right: 0; z-index: 10;
+      overflow-x: hidden; overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      padding: 6px 6px 32px;
+      background: #070b14;
+    }
+    .view.on { display: block; }
+    #app.banner-on .view { top: 66px; }
+
+    .card {
+      background: #0e1628;
+      border: 1px solid #1a2744;
+      border-radius: 8px;
+      padding: 8px;
+      margin-bottom: 6px;
+    }
+    .card h2 {
+      margin: 0 0 6px;
+      font-size: 10px; font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase; color: #7f93b8;
+    }
+    .hero {
+      background: linear-gradient(135deg, #16233f 0%, #0e1628 70%);
+      border-color: #243b66;
+      margin-bottom: 6px;
+    }
+    .hero .hi {
+      font-size: 15px; font-weight: 800; color: #f4f7ff; margin-bottom: 2px;
+    }
+    .hero .sub { font-size: 11px; color: #8fa3c8; line-height: 1.3; }
+
+    .menu, .list { list-style: none; margin: 0; padding: 0; }
+    .menu li, .list li {
+      background: #121c30;
+      border: 2px solid #1e2a44;
+      border-radius: 8px;
+      padding: 9px 8px;
+      margin-bottom: 5px;
+      font-weight: 700;
+    }
+    .menu li .sub, .list li .sub, .track .sub {
+      display: block; font-size: 10px; color: #7f93b8;
+      font-weight: 500; margin-top: 2px;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .menu li .num {
+      display: inline-block; width: 1.2em; color: #5b8fff; font-weight: 800;
+    }
+    .track .name { font-size: 13px; font-weight: 700; color: #eef3ff; }
+    .track .badge {
+      float: right; font-size: 9px; font-weight: 800;
+      color: #3ddc97; letter-spacing: 0.04em;
+    }
+    .track.noprev .badge { color: #f0b429; }
+    .ai-chunk {
+      font-weight: 500 !important;
+      font-size: 12px !important;
+      line-height: 1.4;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .ai-chunk .part {
+      float: right; font-size: 9px; font-weight: 800; color: #5b8fff;
+    }
+    .list li .name { font-size: 13px; font-weight: 700; color: #eef3ff; }
+
+    .menu li.focused, .list li.focused, .btn.focused, .msg.focused, .track.focused,
+    .menu li:focus, .list li:focus, .btn:focus, input:focus, textarea:focus, .msg:focus, .track:focus {
+      border-color: #4d8dff;
+      outline: none;
+      box-shadow: 0 0 0 2px #4d8dff55;
+      background: #152a4e;
+    }
+
+    label {
+      display: block; font-size: 10px; font-weight: 700;
+      color: #7f93b8; margin: 6px 0 3px; letter-spacing: 0.04em;
+    }
+    input, textarea {
+      width: 100%;
+      background: #070b14; color: #eef3ff;
+      border: 2px solid #243556; border-radius: 6px;
+      padding: 7px 8px; font-size: 13px; font-family: inherit;
+      margin-bottom: 4px;
+    }
+    .btn {
+      display: block; width: 100%; margin: 5px 0 0;
+      background: #16233f; color: #eef3ff;
+      border: 2px solid #2a3f66; border-radius: 7px;
+      padding: 10px 8px; font-size: 13px; font-weight: 800;
+      font-family: inherit; text-align: center;
+    }
+    .btn.primary { background: #1a3a6e; border-color: #4d8dff; }
+    .btn.ghost { background: transparent; color: #a8bce0; }
+    .btn.talk {
+      background: #145233; border-color: #3ddc97;
+      font-size: 15px; min-height: 44px; margin-bottom: 4px;
+    }
+    .btn.talk.hot { background: #8b2218; border-color: #ff6b7a; }
+    .row { overflow: hidden; margin-top: 4px; }
+    .row .btn {
+      display: inline-block; width: 48.5%;
+      vertical-align: top; margin: 4px 0 0;
+    }
+    .row .btn + .btn { margin-left: 3%; }
+
+    .hint { font-size: 11px; color: #7f93b8; margin: 4px 0; line-height: 1.35; }
+    .hint.ok { color: #3ddc97; }
+    .hint.err { color: #ff8a96; }
+    .out {
+      background: #070b14; border: 1px solid #1a2744; border-radius: 6px;
+      padding: 7px; font-size: 12px; line-height: 1.35;
+      white-space: pre-wrap; word-break: break-word; color: #d5e0f7;
+      margin-top: 6px;
+    }
+    .now {
+      font-size: 11px; color: #9ec1ff; margin-top: 4px;
+      min-height: 1.2em;
+    }
+
+    #threadBody { margin-bottom: 6px; }
+    .msg {
+      background: #121c30; border: 1px solid #1e2a44; border-radius: 8px;
+      padding: 6px 8px; margin-bottom: 5px; font-size: 12px;
+    }
+    .msg.me { background: #14301f; border-color: #2f9e6a; }
+    .msg b { font-size: 10px; color: #7f93b8; text-transform: uppercase; }
+
+    .soft {
+      position: absolute; left: 0; right: 0; bottom: 0; height: 28px; z-index: 50;
+      background: #060a12; border-top: 1px solid #1a2744;
+      font-size: 11px; font-weight: 800; color: #9ec1ff;
+      padding: 6px 10px 0; overflow: hidden;
+    }
+    #skL { float: left; width: 30%; color: #9ec1ff; }
+    #skC { text-align: center; color: #5ea0ff; }
+    #skR { float: right; width: 30%; text-align: right; margin-top: -14px; color: #9ec1ff; }
+
+    #toast {
+      display: none; position: absolute; left: 10%; right: 10%; bottom: 36px; z-index: 60;
+      background: #1a3a6eee; color: #fff; text-align: center;
+      padding: 7px 8px; border-radius: 10px; font-weight: 800; font-size: 11px;
+      border: 1px solid #4d8dff;
+    }
+    #toast.show { display: block; }
+    .scroll-end { height: 28px; clear: both; }
+    audio { display: none; }
+  </style>
+</head>
+<body>
+  <div id="app">
+    <div id="banner"></div>
+    <div class="top"><b id="title">B-Mud</b><span id="status" class="off">…</span></div>
+    <div id="caps" class="caps">—</div>
+
+    <section id="v-hub" class="view on">
+      <div class="card hero">
+        <div class="hi">B-Mud Tools</div>
+        <div class="sub">dumb backwards · smart bridge</div>
+      </div>
+      <ul class="menu" id="hub">
+        <li tabindex="0" data-go="notes"><span class="num">1</span> Notes + Voice<span class="sub">Capture · SIDE button = mic</span></li>
+        <li tabindex="0" data-go="ai"><span class="num">2</span> AI<span class="sub">Ask / summarize your notes</span></li>
+        <li tabindex="0" data-go="messages"><span class="num">3</span> Messages<span class="sub">iMessage via Mac</span></li>
+        <li tabindex="0" data-go="music"><span class="num">4</span> Music<span class="sub">Search · play on phone</span></li>
+        <li tabindex="0" data-go="settings"><span class="num">5</span> Settings<span class="sub">Bridge URL + token</span></li>
+      </ul>
+      <div class="scroll-end"></div>
+    </section>
+
+    <section id="v-notes" class="view">
+      <div class="card">
+        <h2>Notes + Voice</h2>
+        <button type="button" class="btn talk" id="btnTalk" tabindex="0">Talk (SIDE button)</button>
+        <div class="hint" id="sttHint">Select moves focus. SIDE button starts/stops voice into the focused box.</div>
+        <label>Note</label>
+        <textarea id="note" rows="3" tabindex="0" placeholder="Speak or type…"></textarea>
+        <button type="button" class="btn primary" id="btnSave" tabindex="0">Save note</button>
+      </div>
+      <div class="card">
+        <h2>Recent</h2>
+        <ul class="list" id="noteList"></ul>
+        <div class="hint" id="noteEmpty">No notes yet.</div>
+      </div>
+      <div class="scroll-end"></div>
+    </section>
+
+    <section id="v-ai" class="view">
+      <div class="card">
+        <h2>AI</h2>
+        <div class="hint" id="aiModeHint">Mode: Notes · Select = Ask · ↓ reads answer</div>
+        <button type="button" class="btn ghost" id="btnAiMode" tabindex="0" data-action="ai-mode">Mode: Notes AI</button>
+        <label>Ask</label>
+        <textarea id="aiIn" rows="3" tabindex="0" placeholder="Question… (Select = Ask)"></textarea>
+        <button type="button" class="btn primary" id="btnAsk" tabindex="0" data-action="ask">Ask</button>
+        <button type="button" class="btn ghost" id="btnSum" tabindex="0" data-action="sum">Summarize notes</button>
+      </div>
+      <div class="card" id="aiAnswerCard">
+        <h2>Answer</h2>
+        <div class="hint" id="aiStatus">—</div>
+        <!-- focusable chunks so D-pad can scroll the whole reply -->
+        <ul class="list" id="aiChunks"></ul>
+        <pre class="out" id="aiOut" style="display:none">—</pre>
+      </div>
+      <div class="scroll-end"></div>
+    </section>
+
+    <section id="v-messages" class="view">
+      <div class="card">
+        <h2>Messages</h2>
+        <div class="hint" id="msgHint">Mac imsg · contacts from this Mac</div>
+        <button type="button" class="btn primary" id="btnMsgRefresh" tabindex="0">Refresh chats</button>
+        <button type="button" class="btn ghost" id="btnMsgCompose" tabindex="0" data-action="msg-compose">New message</button>
+        <ul class="list" id="chatList"></ul>
+      </div>
+      <div class="card">
+        <h2>Recents</h2>
+        <ul class="list" id="recentList"></ul>
+        <div class="hint" id="recentEmpty">No recent sends yet.</div>
+      </div>
+      <div class="card">
+        <h2>Contacts</h2>
+        <div class="hint" id="contactHint">Search your Mac contacts</div>
+        <input id="contactQ" type="text" tabindex="0" placeholder="Name or number…" />
+        <button type="button" class="btn primary" id="btnContactSearch" tabindex="0" data-action="contact-search">Find contact</button>
+        <ul class="list" id="contactList"></ul>
+      </div>
+      <div class="scroll-end"></div>
+    </section>
+
+    <section id="v-thread" class="view">
+      <div class="card">
+        <h2 id="threadTitle">Chat</h2>
+        <div id="threadBody"></div>
+        <label>Reply</label>
+        <input id="reply" type="text" tabindex="0" placeholder="Message…" />
+        <button type="button" class="btn talk" id="btnReplyMic" tabindex="0">Talk into reply</button>
+        <button type="button" class="btn primary" id="btnSend" tabindex="0">Send</button>
+      </div>
+      <div class="scroll-end"></div>
+    </section>
+
+    <section id="v-compose" class="view">
+      <div class="card">
+        <h2>New message</h2>
+        <div class="hint" id="composeHint">Pick a contact or type a number</div>
+        <label>To</label>
+        <input id="msgTo" type="text" tabindex="0" placeholder="+1… or name" />
+        <label>Body</label>
+        <textarea id="msgBody" rows="3" tabindex="0" placeholder="Message…"></textarea>
+        <button type="button" class="btn talk" id="btnCompMic" tabindex="0">Talk into body</button>
+        <button type="button" class="btn primary" id="btnCompSend" tabindex="0">Send</button>
+      </div>
+      <div class="scroll-end"></div>
+    </section>
+
+    <section id="v-music" class="view">
+      <div class="card">
+        <h2>Music</h2>
+        <div class="hint">Select track = 30s on this phone. Remote = full Spotify Connect.</div>
+        <input id="musicQ" type="text" tabindex="0" placeholder="Search… (Select = Search)" />
+        <button type="button" class="btn primary" id="btnSearch" tabindex="0" data-action="music-search">Search</button>
+        <div class="row">
+          <button type="button" class="btn" id="btnStop" tabindex="0" data-action="music-stop">Stop</button>
+          <button type="button" class="btn ghost" id="btnRemote" tabindex="0" data-action="music-remote">Remote</button>
+        </div>
+        <div class="row">
+          <button type="button" class="btn ghost" id="btnDevices" tabindex="0" data-action="music-devices">Devices</button>
+          <button type="button" class="btn ghost" id="btnRemotePause" tabindex="0" data-action="music-pause">Pause rem.</button>
+        </div>
+        <button type="button" class="btn" id="btnPlay" tabindex="0" data-action="music-play" style="display:none">Play</button>
+        <button type="button" class="btn" id="btnPause" tabindex="0" data-action="music-pause" style="display:none">Pause</button>
+        <div class="now" id="musicNow">—</div>
+        <div class="hint" id="musicDeviceHint">Remote device: auto</div>
+        <ul class="list" id="deviceList"></ul>
+        <ul class="list" id="musicList"></ul>
+        <pre class="out" id="musicOut" style="display:none">—</pre>
+      </div>
+      <div class="scroll-end"></div>
+    </section>
+
+    <section id="v-settings" class="view">
+      <div class="card">
+        <h2>Settings</h2>
+        <div class="hint" id="verLine">B-Mud v0.7.0</div>
+        <label>Bridge URL</label>
+        <input id="url" type="text" tabindex="0" placeholder="http://192.168.1.10:8790" />
+        <label>Token</label>
+        <input id="token" type="text" tabindex="0" />
+        <button type="button" class="btn primary" id="btnSaveCfg" tabindex="0">Save</button>
+        <button type="button" class="btn ghost" id="btnPing" tabindex="0">Ping</button>
+        <pre class="out" id="cfgOut">—</pre>
+        <div class="hint" id="capsDetail">—</div>
+        <div class="hint">Mac relay :8790 = iMsg + STT + Spotify + Hermes. Mini :8787 = AI/STT.</div>
+        <div class="hint">Side button = voice. Grant Full Disk Access to imsg + Terminal on Mac.</div>
+      </div>
+      <div class="card">
+        <h2>Event log</h2>
+        <ul class="list" id="logList"></ul>
+        <button type="button" class="btn ghost" id="btnLogRefresh" tabindex="0">Refresh log</button>
+      </div>
+      <div id="settingsEnd" tabindex="0" class="scroll-end" aria-hidden="true"></div>
+    </section>
+
+    <audio id="musicPlayer" preload="none"></audio>
+    <div id="toast"></div>
+    <div class="soft"><span id="skL">Home</span><div id="skC">Select</div><span id="skR"></span></div>
+  </div>
+
+  <script src="js/storage.js"></script>
+  <script src="js/bridge.js"></script>
+  <script src="js/core.js"></script>
+</body>
+</html>
