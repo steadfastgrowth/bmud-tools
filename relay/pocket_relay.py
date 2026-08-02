@@ -24,6 +24,7 @@ import re
 import sqlite3
 import subprocess
 import time
+import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -33,16 +34,35 @@ from typing import Any
 
 HOST = os.environ.get("RELAY_HOST", "0.0.0.0")
 PORT = int(os.environ.get("RELAY_PORT", "8790"))
-TOKEN = os.environ.get("POCKET_TOKEN", "")
-MINI = os.environ.get("MINI_BRIDGE", "http://127.0.0.1:8787").rstrip("/")
-IMSG = os.path.expanduser(os.environ.get("IMSG_BIN", "imsg"))
+TOKEN = (os.environ.get("POCKET_TOKEN") or "").strip()
+if not TOKEN:
+    # Fail closed in logs; set POCKET_TOKEN (see relay/run.sh / .env.example)
+    TOKEN = "change-me-set-POCKET_TOKEN"
+MINI = os.environ.get("MINI_BRIDGE", "http://192.168.1.78:8787").rstrip("/")
+IMSG = os.path.expanduser(os.environ.get("IMSG_BIN", "~/Downloads/imsg-bin/imsg"))
 HERMES = os.environ.get("HERMES_BIN", "hermes")
 HERMES_TIMEOUT = int(os.environ.get("HERMES_TIMEOUT", "300"))
+
+# STT — aim for Wispr/Granola-class dictation (strong ASR + LLM polish)
+# engine: auto | local | openai | mini
+STT_ENGINE = (os.environ.get("STT_ENGINE") or "auto").strip().lower()
+STT_MODEL = os.environ.get("STT_MODEL", "mlx-community/whisper-large-v3-turbo")
+STT_PYTHON = os.path.expanduser(
+    os.environ.get("STT_PYTHON", "~/.local/share/bmud-stt/bin/python")
+)
+STT_POLISH = (os.environ.get("STT_POLISH") or "1").strip().lower() not in ("0", "false", "no", "off")
+STT_VOCAB_PATH = os.path.expanduser(
+    os.environ.get("STT_VOCAB", "~/.config/bmud/stt_vocab.txt")
+)
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+OPENAI_STT_MODEL = os.environ.get("OPENAI_STT_MODEL", "gpt-4o-transcribe")
+FFMPEG = os.environ.get("FFMPEG", "ffmpeg")
 
 _CONTACT_CACHE: dict[str, str] = {}  # phone digits / email → display name
 _CONTACT_LIST: list[dict[str, Any]] = []  # [{name, phones, emails}]
 _CONTACT_LOADED = False
 _CONTACT_LOAD_ERROR: str | None = None
+_STT_STATUS: dict[str, Any] = {"ready": False, "engine": None, "model": None, "error": None}
 
 
 def digits_only(s: str) -> str:
@@ -234,6 +254,389 @@ def proxy(method: str, path: str, body: bytes | None, headers: dict) -> tuple[in
         return e.code, e.read(), e.headers.get("Content-Type", "application/json")
     except Exception as e:
         return 502, json.dumps({"error": f"proxy: {e}"}).encode(), "application/json"
+
+
+# ---------------------------------------------------------------------------
+# High-quality STT (local mlx-whisper large-v3-turbo + optional OpenAI + Grok polish)
+# ---------------------------------------------------------------------------
+
+def load_stt_vocab() -> str:
+    """Optional domain terms (one per line) for Whisper initial_prompt + polish."""
+    defaults = [
+        "B-Mud",
+        "KaiOS",
+        "Tailscale",
+        "Tailnet",
+        "Hermes",
+        "Grok",
+        "iMessage",
+        "Spotify",
+        "OpenStreetMap",
+        "Nokia 2780",
+    ]
+    words = list(defaults)
+    try:
+        p = Path(STT_VOCAB_PATH)
+        if p.is_file():
+            for line in p.read_text(encoding="utf-8", errors="ignore").splitlines():
+                w = line.strip()
+                if w and not w.startswith("#") and w not in words:
+                    words.append(w)
+    except Exception:
+        pass
+    # Whisper initial_prompt works best short
+    return ", ".join(words[:40])
+
+
+def stt_local_available() -> bool:
+    return bool(STT_PYTHON and os.path.isfile(STT_PYTHON))
+
+
+def stt_probe() -> dict[str, Any]:
+    """Update cached STT readiness for /health."""
+    global _STT_STATUS
+    eng = STT_ENGINE
+    if eng == "auto":
+        if OPENAI_API_KEY:
+            eng = "openai"
+        elif stt_local_available():
+            eng = "local"
+        else:
+            eng = "mini"
+    model = OPENAI_STT_MODEL if eng == "openai" else (STT_MODEL if eng == "local" else "mini/base")
+    err = None
+    ready = True
+    if eng == "openai" and not OPENAI_API_KEY:
+        ready, err = False, "OPENAI_API_KEY missing"
+    elif eng == "local" and not stt_local_available():
+        ready, err = False, f"STT python missing: {STT_PYTHON}"
+    _STT_STATUS = {
+        "ready": ready,
+        "engine": eng,
+        "model": model,
+        "polish": STT_POLISH,
+        "error": err,
+        "vocab": STT_VOCAB_PATH,
+    }
+    return _STT_STATUS
+
+
+def parse_multipart_files(body: bytes, content_type: str) -> list[tuple[str, bytes, str]]:
+    """Return list of (field_name, data, filename) from multipart/form-data."""
+    from email.parser import BytesParser
+    from email.policy import default as email_default
+
+    if not body or "multipart/form-data" not in (content_type or "").lower():
+        return []
+    try:
+        msg = BytesParser(policy=email_default).parsebytes(
+            b"Content-Type: " + content_type.encode("utf-8", "ignore") + b"\r\n\r\n" + body
+        )
+    except Exception:
+        return []
+    out: list[tuple[str, bytes, str]] = []
+    if not msg.is_multipart():
+        return out
+    for part in msg.iter_parts():
+        cd = part.get("Content-Disposition", "") or ""
+        if "form-data" not in cd:
+            continue
+        name = part.get_param("name", header="Content-Disposition") or ""
+        filename = part.get_filename() or ""
+        payload = part.get_payload(decode=True) or b""
+        out.append((str(name), payload, str(filename or "")))
+    return out
+
+
+def extract_audio_from_request(body: bytes, content_type: str) -> tuple[bytes, str]:
+    """Pull audio bytes + suggested extension from POST body."""
+    ct = (content_type or "").lower()
+    if "multipart/form-data" in ct:
+        parts = parse_multipart_files(body, content_type)
+        preferred = ("audio", "file", "recording", "speech", "blob")
+        # Prefer known field names
+        for want in preferred:
+            for name, data, filename in parts:
+                if name == want and data:
+                    ext = Path(filename).suffix.lstrip(".") if filename else ""
+                    if not ext:
+                        ext = "webm"
+                    return data, ext
+        # Any binary-ish field
+        for name, data, filename in parts:
+            if data and len(data) > 64:
+                ext = Path(filename).suffix.lstrip(".") if filename else "webm"
+                return data, ext or "webm"
+        return b"", ""
+    # Raw body (audio/* or octet-stream)
+    if body:
+        if "3gpp" in ct or "3gp" in ct:
+            return body, "3gp"
+        if "ogg" in ct:
+            return body, "ogg"
+        if "mp4" in ct or "m4a" in ct:
+            return body, "m4a"
+        if "wav" in ct:
+            return body, "wav"
+        if "mpeg" in ct or "mp3" in ct:
+            return body, "mp3"
+        return body, "webm"
+    return b"", ""
+
+
+def stt_transcribe_openai(audio: bytes, ext: str, language: str) -> dict[str, Any]:
+    """Cloud STT via OpenAI (gpt-4o-transcribe preferred)."""
+    if not OPENAI_API_KEY:
+        raise RuntimeError("OPENAI_API_KEY not set")
+    boundary = f"----bmud{int(time.time() * 1000)}"
+    filename = f"note.{ext or 'webm'}"
+    mime = {
+        "webm": "audio/webm",
+        "3gp": "audio/3gpp",
+        "ogg": "audio/ogg",
+        "wav": "audio/wav",
+        "m4a": "audio/mp4",
+        "mp3": "audio/mpeg",
+        "mp4": "audio/mp4",
+    }.get((ext or "").lower(), "application/octet-stream")
+    vocab = load_stt_vocab()
+    fields: list[tuple[str, str]] = [
+        ("model", OPENAI_STT_MODEL),
+        ("language", (language or "en")[:8]),
+        ("response_format", "json"),
+    ]
+    if vocab and "gpt-4o" not in OPENAI_STT_MODEL:
+        fields.append(("prompt", vocab[:800]))
+    chunks: list[bytes] = []
+    for k, v in fields:
+        chunks.append(
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n".encode()
+        )
+    chunks.append(
+        (
+            f"--{boundary}\r\n"
+            f'Content-Disposition: form-data; name="file"; filename="{filename}"\r\n'
+            f"Content-Type: {mime}\r\n\r\n"
+        ).encode()
+        + audio
+        + b"\r\n"
+    )
+    chunks.append(f"--{boundary}--\r\n".encode())
+    body = b"".join(chunks)
+    # gpt-4o-transcribe uses /v1/audio/transcriptions
+    url = "https://api.openai.com/v1/audio/transcriptions"
+    req = urllib.request.Request(body=body, method="POST", url=url)
+    req.add_header("Authorization", f"Bearer {OPENAI_API_KEY}")
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        data = json.loads(resp.read().decode() or "{}")
+    text = (data.get("text") or "").strip()
+    return {"text": text, "engine": "openai", "model": OPENAI_STT_MODEL, "raw": data}
+
+
+def stt_transcribe_local(audio: bytes, ext: str, language: str) -> dict[str, Any]:
+    """Local Apple Silicon STT via mlx-whisper (large-v3-turbo by default)."""
+    if not stt_local_available():
+        raise RuntimeError(f"local STT python not found: {STT_PYTHON}")
+    vocab = load_stt_vocab()
+    with tempfile.TemporaryDirectory(prefix="bmud-stt-") as td:
+        td_path = Path(td)
+        src = td_path / f"in.{ext or 'webm'}"
+        wav = td_path / "in.wav"
+        out_json = td_path / "out.json"
+        src.write_bytes(audio)
+        # Normalize to 16k mono wav for best ASR
+        conv = subprocess.run(
+            [
+                FFMPEG,
+                "-y",
+                "-i",
+                str(src),
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-c:a",
+                "pcm_s16le",
+                str(wav),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        if conv.returncode != 0 or not wav.is_file():
+            # fall back to original path if convert fails
+            audio_path = src
+            err_hint = (conv.stderr or conv.stdout or "")[-400:]
+            if not audio:
+                raise RuntimeError(f"ffmpeg convert failed: {err_hint}")
+        else:
+            audio_path = wav
+            err_hint = ""
+
+        script = r"""
+import json, sys
+import mlx_whisper
+
+audio, model, language, prompt, out_path = sys.argv[1:6]
+kwargs = {
+    "path_or_hf_repo": model,
+    "verbose": False,
+    "word_timestamps": False,
+}
+if language and language != "auto":
+    kwargs["language"] = language
+if prompt:
+    kwargs["initial_prompt"] = prompt
+# Dictation-friendly decoding
+kwargs["condition_on_previous_text"] = True
+kwargs["temperature"] = (0.0, 0.2, 0.4)
+result = mlx_whisper.transcribe(audio, **kwargs)
+text = (result.get("text") or "").strip()
+Path = __import__("pathlib").Path
+Path(out_path).write_text(json.dumps({"text": text, "language": result.get("language")}), encoding="utf-8")
+"""
+        p = subprocess.run(
+            [
+                STT_PYTHON,
+                "-c",
+                script,
+                str(audio_path),
+                STT_MODEL,
+                (language or "en"),
+                vocab,
+                str(out_json),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if p.returncode != 0 or not out_json.is_file():
+            err = (p.stderr or p.stdout or "mlx-whisper failed").strip()
+            if err_hint:
+                err = f"{err}\nffmpeg: {err_hint}"
+            raise RuntimeError(err[:800])
+        data = json.loads(out_json.read_text(encoding="utf-8"))
+        return {
+            "text": (data.get("text") or "").strip(),
+            "engine": "local",
+            "model": STT_MODEL,
+            "language": data.get("language"),
+        }
+
+
+def polish_dictation(raw: str, language: str = "en") -> tuple[str, bool]:
+    """
+    Wispr/Granola-style cleanup via Mini Grok chat.
+    Returns (text, polished?).
+    """
+    raw = (raw or "").strip()
+    if not raw or not STT_POLISH:
+        return raw, False
+    # Skip polish for very short utterances (latency)
+    if len(raw.split()) < 3:
+        return raw, False
+    vocab = load_stt_vocab()
+    system = (
+        "You are a premium voice-dictation cleaner (Wispr Flow / Granola quality). "
+        "Rewrite the raw speech transcript into polished text ready to insert into a message or note.\n"
+        "Rules:\n"
+        "- Fix punctuation, capitalization, and light grammar.\n"
+        "- Remove filler (um, uh, like, you know, sort of) when meaningless.\n"
+        "- Apply self-corrections: if they say X then correct to Y, keep only Y.\n"
+        "- Expand obvious spoken punctuation ('question mark' → ?).\n"
+        "- Keep the speaker's meaning, names, numbers, and tone.\n"
+        "- Do NOT invent facts or add content that was not spoken.\n"
+        "- Prefer natural short sentences for texts/iMessage.\n"
+        "- Output ONLY the cleaned text — no quotes, labels, or preamble."
+    )
+    if vocab:
+        system += f"\nKnown terms (spell exactly when heard): {vocab}."
+    user = f"Language: {language or 'en'}\n\nRAW TRANSCRIPT:\n{raw}"
+    payload = {
+        "message": user,
+        "system": system,
+        "notes": system,  # some bridges use notes as system context
+        "device": "bmud-stt-polish",
+        "mode": "dictation_polish",
+    }
+    try:
+        headers = {
+            "Authorization": f"Bearer {TOKEN}",
+            "Content-Type": "application/json",
+            "X-Pocket-Token": TOKEN,
+        }
+        code, body, _ = proxy("POST", "/v1/chat", json.dumps(payload).encode(), headers)
+        if code != 200:
+            return raw, False
+        data = json.loads(body.decode() or "{}")
+        cleaned = (
+            data.get("reply")
+            or data.get("text")
+            or data.get("message")
+            or data.get("content")
+            or ""
+        )
+        if isinstance(cleaned, dict):
+            cleaned = cleaned.get("text") or cleaned.get("content") or ""
+        cleaned = str(cleaned).strip().strip('"').strip()
+        # Guardrails: reject empty or wildly longer rewrites
+        if not cleaned:
+            return raw, False
+        if len(cleaned) > max(40, int(len(raw) * 2.5)):
+            return raw, False
+        return cleaned, True
+    except Exception:
+        return raw, False
+
+
+def stt_transcribe(body: bytes, content_type: str, language: str = "en", polish: bool | None = None) -> dict[str, Any]:
+    """Full pipeline: extract audio → ASR → optional polish."""
+    t0 = time.time()
+    audio, ext = extract_audio_from_request(body, content_type)
+    if not audio:
+        return {"ok": False, "error": "no audio in request", "text": ""}
+    status = stt_probe()
+    eng = status.get("engine") or "local"
+    do_polish = STT_POLISH if polish is None else polish
+    raw_text = ""
+    meta: dict[str, Any] = {"engine": eng, "model": status.get("model")}
+    try:
+        if eng == "openai":
+            res = stt_transcribe_openai(audio, ext, language)
+        elif eng == "local":
+            res = stt_transcribe_local(audio, ext, language)
+        else:
+            # mini fallback: re-proxy is handled by caller
+            raise RuntimeError("use_mini")
+        raw_text = (res.get("text") or "").strip()
+        meta.update({k: res.get(k) for k in ("engine", "model", "language") if res.get(k)})
+    except RuntimeError as e:
+        if str(e) == "use_mini":
+            raise
+        # Try local then mini on failure if auto
+        if eng == "openai" and stt_local_available():
+            res = stt_transcribe_local(audio, ext, language)
+            raw_text = (res.get("text") or "").strip()
+            meta.update({"engine": res.get("engine"), "model": res.get("model"), "fallback": "local"})
+        else:
+            raise
+    polished = False
+    final = raw_text
+    if do_polish and raw_text:
+        final, polished = polish_dictation(raw_text, language)
+    return {
+        "ok": True,
+        "text": final,
+        "transcript": final,
+        "raw_text": raw_text,
+        "polished": polished,
+        "engine": meta.get("engine"),
+        "model": meta.get("model"),
+        "language": language,
+        "audio_bytes": len(audio),
+        "elapsed_s": round(time.time() - t0, 2),
+    }
 
 
 def normalize_chats(data: Any) -> list[dict]:
@@ -506,46 +909,364 @@ def itunes_preview(name: str, artists: str) -> str | None:
     return None
 
 
+def _normalize_track(t: dict | None, *, resolve_preview: bool = True) -> dict | None:
+    """Normalize Spotify track object (old or new API shapes)."""
+    if not t or not isinstance(t, dict):
+        return None
+    # Wrappers: { track: {...} } or { item: {...} }
+    if isinstance(t.get("track"), dict) and (t.get("type") in (None, "playlist_track") or "album" not in t):
+        t = t["track"]
+    if isinstance(t.get("item"), dict) and "artists" not in t:
+        t = t["item"]
+    if not isinstance(t, dict):
+        return None
+    # Skip episodes / non-tracks
+    if t.get("type") == "episode":
+        return None
+    if t.get("episode") is True and t.get("track") is not True:
+        return None
+    if t.get("type") and t.get("type") not in ("track",) and t.get("track") is not True:
+        return None
+    if not t.get("id") and not t.get("uri") and not t.get("name"):
+        return None
+    artists = ", ".join(a.get("name", "") for a in (t.get("artists") or []) if isinstance(a, dict))
+    name = t.get("name") or ""
+    tid = t.get("id") or ""
+    uri = t.get("uri") or (f"spotify:track:{tid}" if tid else "")
+    album = ""
+    al = t.get("album")
+    if isinstance(al, dict):
+        album = al.get("name") or ""
+    preview = t.get("preview_url")
+    if resolve_preview and not preview and name:
+        preview = itunes_preview(name, artists)
+    duration_ms = t.get("duration_ms") or 0
+    return {
+        "name": name,
+        "artists": artists,
+        "uri": uri,
+        "id": tid,
+        "album": album,
+        "preview_url": preview,
+        "duration_ms": duration_ms,
+        "duration_s": int(duration_ms / 1000) if duration_ms else 0,
+        "explicit": bool(t.get("explicit")),
+        "can_play_on_phone": bool(preview),
+        "is_playable": t.get("is_playable", True),
+    }
+
+
 def music_search(q: str, limit: int = 8) -> dict:
     data = spotify_api("GET", "/search", {"q": q, "type": "track", "limit": str(limit)})
     items = ((data.get("tracks") or {}).get("items")) or []
     tracks = []
     for t in items:
-        artists = ", ".join(a.get("name", "") for a in (t.get("artists") or []))
-        name = t.get("name") or ""
-        # Prefer Spotify preview when present; fall back to iTunes 30s clip for phone speaker
-        preview = t.get("preview_url") or itunes_preview(name, artists)
-        tracks.append(
-            {
-                "name": name,
-                "artists": artists,
-                "uri": t.get("uri"),
-                "id": t.get("id"),
-                "album": (t.get("album") or {}).get("name"),
-                "preview_url": preview,
-                "duration_ms": t.get("duration_ms"),
-                "explicit": bool(t.get("explicit")),
-                "can_play_on_phone": bool(preview),
-            }
-        )
+        nt = _normalize_track(t, resolve_preview=True)
+        if nt:
+            tracks.append(nt)
     return {
         "tracks": tracks,
         "query": q,
+        "source": "search",
         "play_modes": {
-            "phone": "Select a track → 30s preview on handset speaker",
-            "remote": "Remote → full track via Spotify Connect (TV/Mac)",
+            "phone": "Select → play on flip (preview or matched full audio)",
+            "remote": "Remote → full Spotify Connect (Mac/TV)",
         },
     }
 
 
-def music_control(action: str, uri: str | None = None, device_id: str | None = None) -> dict:
+def music_recent(limit: int = 20) -> dict:
+    data = spotify_api("GET", "/me/player/recently-played", {"limit": str(min(50, max(1, limit)))})
+    tracks = []
+    seen: set[str] = set()
+    for it in data.get("items") or []:
+        t = it.get("track") if isinstance(it, dict) else None
+        nt = _normalize_track(t, resolve_preview=False)
+        if not nt:
+            continue
+        key = nt.get("uri") or nt.get("id") or ""
+        if key and key in seen:
+            continue
+        if key:
+            seen.add(key)
+        nt["played_at"] = it.get("played_at")
+        # light preview resolve for first few so list stays snappy
+        if len(tracks) < 8 and not nt.get("preview_url"):
+            nt["preview_url"] = itunes_preview(nt.get("name") or "", nt.get("artists") or "")
+            nt["can_play_on_phone"] = bool(nt["preview_url"])
+        tracks.append(nt)
+    return {"tracks": tracks, "source": "recent", "total": len(tracks)}
+
+
+def music_liked(limit: int = 30, offset: int = 0) -> dict:
+    data = spotify_api(
+        "GET",
+        "/me/tracks",
+        {"limit": str(min(50, max(1, limit))), "offset": str(max(0, offset)), "market": "from_token"},
+    )
+    tracks = []
+    for it in data.get("items") or []:
+        t = it.get("track") if isinstance(it, dict) else None
+        nt = _normalize_track(t, resolve_preview=False)
+        if nt:
+            if len(tracks) < 8 and not nt.get("preview_url"):
+                nt["preview_url"] = itunes_preview(nt.get("name") or "", nt.get("artists") or "")
+                nt["can_play_on_phone"] = bool(nt["preview_url"])
+            tracks.append(nt)
+    return {
+        "tracks": tracks,
+        "source": "liked",
+        "total": data.get("total"),
+        "offset": offset,
+        "next": bool(data.get("next")),
+    }
+
+
+def music_playlists(limit: int = 30, offset: int = 0) -> dict:
+    data = spotify_api(
+        "GET",
+        "/me/playlists",
+        {"limit": str(min(50, max(1, limit))), "offset": str(max(0, offset))},
+    )
+    playlists = []
+    for p in data.get("items") or []:
+        if not p:
+            continue
+        images = p.get("images") or []
+        playlists.append(
+            {
+                "id": p.get("id"),
+                "name": p.get("name") or "Playlist",
+                "uri": p.get("uri") or (f"spotify:playlist:{p.get('id')}" if p.get("id") else ""),
+                "owner": ((p.get("owner") or {}).get("display_name") or (p.get("owner") or {}).get("id") or ""),
+                "tracks_total": ((p.get("tracks") or {}).get("total") if isinstance(p.get("tracks"), dict) else None),
+                "public": p.get("public"),
+                "image": (images[0].get("url") if images else None),
+            }
+        )
+    return {
+        "playlists": playlists,
+        "source": "playlists",
+        "total": data.get("total"),
+        "offset": offset,
+        "next": bool(data.get("next")),
+    }
+
+
+def music_playlist_tracks(playlist_id: str, limit: int = 40, offset: int = 0) -> dict:
+    pid = (playlist_id or "").strip()
+    if pid.startswith("spotify:playlist:"):
+        pid = pid.split(":")[-1]
+    if not pid:
+        raise RuntimeError("playlist id required")
+    # New Spotify Web API uses /items; /tracks is 403 for many clients
+    data = None
+    last_err = None
+    for path in (
+        f"/playlists/{pid}/items",
+        f"/playlists/{pid}/tracks",
+    ):
+        try:
+            data = spotify_api(
+                "GET",
+                path,
+                {
+                    "limit": str(min(50, max(1, limit))),
+                    "offset": str(max(0, offset)),
+                    "market": "from_token",
+                },
+            )
+            break
+        except Exception as e:
+            last_err = e
+            data = None
+    if data is None:
+        raise RuntimeError(str(last_err) if last_err else "playlist tracks failed")
+    tracks = []
+    for it in data.get("items") or []:
+        if not isinstance(it, dict):
+            continue
+        raw = it.get("item") or it.get("track") or it
+        nt = _normalize_track(raw if isinstance(raw, dict) else None, resolve_preview=False)
+        if nt:
+            tracks.append(nt)
+    # enrich first few with previews for phone
+    for i, nt in enumerate(tracks[:10]):
+        if not nt.get("preview_url"):
+            nt["preview_url"] = itunes_preview(nt.get("name") or "", nt.get("artists") or "")
+            nt["can_play_on_phone"] = bool(nt["preview_url"])
+    # playlist meta
+    meta_name = ""
+    meta_uri = f"spotify:playlist:{pid}"
+    try:
+        meta = spotify_api("GET", f"/playlists/{pid}", {"fields": "name,uri,tracks.total"})
+        meta_name = meta.get("name") or ""
+        meta_uri = meta.get("uri") or meta_uri
+    except Exception:
+        pass
+    return {
+        "tracks": tracks,
+        "source": "playlist",
+        "playlist_id": pid,
+        "playlist_name": meta_name,
+        "playlist_uri": meta_uri,
+        "total": data.get("total"),
+        "offset": offset,
+        "next": bool(data.get("next")),
+    }
+
+
+def music_now() -> dict:
+    try:
+        data = spotify_api("GET", "/me/player")
+    except Exception as e:
+        return {"ok": False, "is_playing": False, "error": str(e)[:200]}
+    if not data or not isinstance(data, dict):
+        return {"ok": True, "is_playing": False, "item": None}
+    item = data.get("item") or data.get("track")
+    nt = _normalize_track(item, resolve_preview=False) if item else None
+    dev = data.get("device") or {}
+    return {
+        "ok": True,
+        "is_playing": bool(data.get("is_playing")),
+        "progress_ms": data.get("progress_ms"),
+        "shuffle": data.get("shuffle_state"),
+        "repeat": data.get("repeat_state"),
+        "device": {"id": dev.get("id"), "name": dev.get("name"), "type": dev.get("type"), "is_active": dev.get("is_active")},
+        "item": nt,
+        "context": data.get("context"),
+    }
+
+
+# --- Phone full-length audio (matched stream) — Spotify Web API has no full-file URL ---
+YTDLP = os.environ.get("YTDLP", "yt-dlp")
+# Default OFF for public/OSS safety: official full audio is Spotify Connect only.
+# Opt-in experimental matched streams: MUSIC_MATCH_FULL=1 (see docs/MUSIC.md).
+MUSIC_MATCH_FULL = (os.environ.get("MUSIC_MATCH_FULL") or "0").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+    "off",
+)
+_music_stream_cache: dict[str, dict[str, Any]] = {}
+
+
+def _ytdlp_available() -> bool:
+    try:
+        p = subprocess.run([YTDLP, "--version"], capture_output=True, text=True, timeout=8)
+        return p.returncode == 0
+    except Exception:
+        return False
+
+
+def music_match_stream_url(name: str, artists: str) -> dict[str, Any] | None:
+    """
+    EXPERIMENTAL / OPT-IN only (MUSIC_MATCH_FULL=1).
+
+    Best-effort full-length audio for a personal handset via external search tools.
+    This is NOT official Spotify audio, NOT DRM Spotify files, and NOT enabled by default.
+
+    Operators must ensure their own use complies with third-party terms and applicable law.
+    The B-Mud project does not provide or host music content.
+    """
+    if not MUSIC_MATCH_FULL or not _ytdlp_available():
+        return None
+    q = f"{artists or ''} - {name or ''}".strip(" -")
+    if not q:
+        return None
+    cache_key = q.lower()
+    hit = _music_stream_cache.get(cache_key)
+    if hit and hit.get("exp", 0) > time.time() and hit.get("url"):
+        return hit
+    try:
+        # Prefer m4a/aac progressive when possible (KaiOS <audio> friendly)
+        p = subprocess.run(
+            [
+                YTDLP,
+                "--no-playlist",
+                "-f",
+                "bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best",
+                "--get-url",
+                "--get-title",
+                "--get-duration",
+                f"ytsearch1:{q} audio",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=45,
+        )
+        if p.returncode != 0:
+            return None
+        lines = [ln.strip() for ln in (p.stdout or "").splitlines() if ln.strip()]
+        if not lines:
+            return None
+        # yt-dlp prints title, then url, duration order can vary; URL is http(s)
+        url = next((ln for ln in lines if ln.startswith("http")), None)
+        title = next((ln for ln in lines if not ln.startswith("http") and not ln.isdigit()), "")
+        if not url:
+            return None
+        rec = {
+            "url": url,
+            "title": title,
+            "source": "match",
+            "query": q,
+            "exp": time.time() + 600,  # signed CDN URLs expire
+        }
+        _music_stream_cache[cache_key] = rec
+        # cap cache size
+        if len(_music_stream_cache) > 64:
+            oldest = sorted(_music_stream_cache.items(), key=lambda kv: kv[1].get("exp", 0))[:16]
+            for k, _ in oldest:
+                _music_stream_cache.pop(k, None)
+        return rec
+    except Exception as e:
+        print("[relay] music match fail", e)
+        return None
+
+
+def music_resolve_phone_audio(track: dict) -> dict:
+    """Attach phone_stream fields: preview and/or full match URL."""
+    t = dict(track or {})
+    name = t.get("name") or ""
+    artists = t.get("artists") or ""
+    preview = t.get("preview_url") or itunes_preview(name, artists)
+    t["preview_url"] = preview
+    match = music_match_stream_url(name, artists) if MUSIC_MATCH_FULL else None
+    if match and match.get("url"):
+        t["phone_full_url"] = match["url"]
+        t["phone_full_source"] = "match"
+        t["phone_full_title"] = match.get("title")
+        t["can_play_on_phone"] = True
+        t["phone_play_mode"] = "full"
+    elif preview:
+        t["can_play_on_phone"] = True
+        t["phone_play_mode"] = "preview"
+    else:
+        t["can_play_on_phone"] = False
+        t["phone_play_mode"] = "remote_only"
+    return t
+
+
+def music_control(
+    action: str,
+    uri: str | None = None,
+    device_id: str | None = None,
+    context_uri: str | None = None,
+    offset_uri: str | None = None,
+) -> dict:
     action = (action or "").lower().strip()
     q = {}
     if device_id:
         q["device_id"] = device_id
     if action in ("play", "resume"):
-        body = {}
-        if uri:
+        body: dict[str, Any] = {}
+        # Prefer context (playlist/album) + optional offset track
+        ctx = context_uri or ""
+        if ctx and not ctx.startswith("spotify:track:"):
+            body["context_uri"] = ctx
+            if offset_uri or (uri and uri.startswith("spotify:track:")):
+                body["offset"] = {"uri": offset_uri or uri}
+        elif uri:
             if uri.startswith("spotify:track:"):
                 body = {"uris": [uri]}
             else:
@@ -562,12 +1283,11 @@ def music_control(action: str, uri: str | None = None, device_id: str | None = N
                 # prefer active, else first
                 pick = next((d for d in devices if d.get("is_active")), devices[0])
                 spotify_api("PUT", "/me/player", None, {"device_ids": [pick["id"]], "play": True})
-                if uri:
-                    body = {"uris": [uri]} if uri.startswith("spotify:track:") else {"context_uri": uri}
-                    spotify_api("PUT", "/me/player/play", {"device_id": pick["id"]}, body if body else None)
+                if body:
+                    spotify_api("PUT", "/me/player/play", {"device_id": pick["id"]}, body)
                 return {"ok": True, "action": action, "device": pick.get("name")}
             raise
-        return {"ok": True, "action": action, "uri": uri}
+        return {"ok": True, "action": action, "uri": uri, "context_uri": context_uri}
     if action == "pause":
         spotify_api("PUT", "/me/player/pause", q or None, None)
         return {"ok": True, "action": "pause"}
@@ -909,11 +1629,12 @@ def term_exec(
     user: str | None = None,
     port: int | None = None,
     timeout: int | None = None,
+    password: str | None = None,
 ) -> dict:
     """Run a command on a Tailnet host via SSH, or locally if host is this Mac.
 
     Local (no sshd required): host = local | localhost | self | this Mac's TS IP/name.
-    Remote: uses the Mac's SSH keys/agent (BatchMode — keys required, no password prompt).
+    Remote: SSH with Mac keys (default), or password via SSH_ASKPASS if password provided.
     """
     host = (host or "").strip()
     command = (command or "").strip()
@@ -996,34 +1717,62 @@ def term_exec(
 
     # --- remote SSH ---
     target = f"{user}@{host}" if user else host
+    password = (password or "").strip() or None
     cmd = [
         SSH_BIN,
-        "-o", "BatchMode=yes",
         "-o", "ConnectTimeout=12",
         "-o", "ServerAliveInterval=5",
         "-o", "ServerAliveCountMax=2",
         "-o", "StrictHostKeyChecking=accept-new",
+        "-o", "NumberOfPasswordPrompts=1",
     ]
+    if not password:
+        # Keys only — do not hang waiting for a password (no TTY on flip path)
+        cmd.extend(["-o", "BatchMode=yes", "-o", "PreferredAuthentications=publickey"])
+    else:
+        cmd.extend(["-o", "PreferredAuthentications=password,keyboard-interactive,publickey"])
     if port:
         cmd.extend(["-p", str(int(port))])
     cmd.extend([target, command])
 
-    t0 = time.time()
+    env = os.environ.copy()
+    askpass_path = None
+    if password:
+        # OpenSSH runs SSH_ASKPASS when stdin is not a TTY
+        fd, askpass_path = tempfile.mkstemp(prefix="bmud-askpass-", suffix=".sh")
+        os.close(fd)
+        Path(askpass_path).write_text("#!/bin/sh\nexec printf '%s\\n' \"$BMUD_SSH_PASS\"\n")
+        os.chmod(askpass_path, 0o700)
+        env["BMUD_SSH_PASS"] = password
+        env["SSH_ASKPASS"] = askpass_path
+        env["SSH_ASKPASS_REQUIRE"] = "force"
+        # Some OpenSSH builds require DISPLAY set to invoke askpass
+        env["DISPLAY"] = env.get("DISPLAY") or "none"
+
     try:
         p = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=env,
+            stdin=subprocess.DEVNULL,
         )
     except subprocess.TimeoutExpired as e:
         out = (e.stdout or "") if isinstance(e.stdout, str) else ""
         err = (e.stderr or "") if isinstance(e.stderr, str) else "timeout"
+        if askpass_path:
+            try:
+                os.unlink(askpass_path)
+            except Exception:
+                pass
         return {
             "ok": False,
             "host": host,
             "user": user,
             "command": command,
+            "mode": "ssh",
+            "auth": "password" if password else "key",
             "exit_code": None,
             "stdout": (out or "")[:TERM_MAX_OUTPUT],
             "stderr": (err or "timeout")[:8000],
@@ -1031,189 +1780,46 @@ def term_exec(
             "error": f"timeout after {timeout}s",
         }
     except FileNotFoundError:
+        if askpass_path:
+            try:
+                os.unlink(askpass_path)
+            except Exception:
+                pass
         raise RuntimeError("ssh not found on Mac")
+    finally:
+        if askpass_path:
+            try:
+                os.unlink(askpass_path)
+            except Exception:
+                pass
+
     stdout = (p.stdout or "")[:TERM_MAX_OUTPUT]
     stderr = (p.stderr or "")[:8000]
+    low = (stdout + "\n" + stderr).lower()
+    if p.returncode != 0 and ("permission denied" in low or "publickey" in low or "authentication" in low):
+        if not password:
+            tip = (
+                "\n\n[hint] SSH auth failed (no key accepted). Options:\n"
+                "  1) Fill Password on the phone Terminal screen and Run again, or\n"
+                "  2) On Mac: ssh-copy-id USER@HOST  (preferred), or\n"
+                "  3) Enable Remote Login on macOS targets"
+            )
+        else:
+            tip = "\n\n[hint] Password was sent but auth still failed. Check user/password, or use key auth."
+        stdout = (stdout or "") + tip
     return {
         "ok": p.returncode == 0,
         "host": host,
         "user": user,
         "command": command,
         "mode": "ssh",
+        "auth": "password" if password else "key",
         "exit_code": p.returncode,
         "stdout": stdout,
         "stderr": stderr,
         "elapsed_s": round(time.time() - t0, 2),
         "truncated": len(p.stdout or "") > TERM_MAX_OUTPUT,
     }
-
-
-
-# --- Podcasts (free RSS / enclosures) ---
-import xml.etree.ElementTree as ET
-
-PODCAST_UA = os.environ.get("PODCAST_USER_AGENT", "B-MudTools/0.9 (KaiOS; personal podcast client)")
-PODCAST_MAX_EPISODES = int(os.environ.get("PODCAST_MAX_EPISODES", "30"))
-
-# Curated free public RSS feeds (no login)
-PODCAST_CATALOG = [
-    {"id": "planet-money", "title": "Planet Money", "author": "NPR",
-     "url": "https://feeds.npr.org/510289/podcast.xml"},
-    {"id": "npr-news-now", "title": "NPR News Now", "author": "NPR",
-     "url": "https://feeds.npr.org/500005/podcast.xml"},
-    {"id": "up-first", "title": "Up First", "author": "NPR",
-     "url": "https://feeds.npr.org/510318/podcast.xml"},
-    {"id": "ted-talks-daily", "title": "TED Talks Daily", "author": "TED",
-     "url": "https://feeds.feedburner.com/TEDTalks_audio"},
-    {"id": "freakonomics", "title": "Freakonomics Radio", "author": "Freakonomics",
-     "url": "https://feeds.simplecast.com/Y8lFbOT4"},
-    {"id": "reply-all", "title": "Reply All (archive)", "author": "Gimlet",
-     "url": "https://feeds.simplecast.com/4T39_jAj"},
-    {"id": "this-american-life", "title": "This American Life", "author": "TAL",
-     "url": "https://www.thisamericanlife.org/podcast/rss.xml"},
-    {"id": "99pi", "title": "99% Invisible", "author": "Roman Mars",
-     "url": "https://feeds.simplecast.com/BqbsxVfO"},
-]
-
-
-def _strip_html(s: str) -> str:
-    s = re.sub(r"(?is)<script[^>]*>.*?</script>", " ", s or "")
-    s = re.sub(r"(?is)<style[^>]*>.*?</style>", " ", s)
-    s = re.sub(r"(?s)<[^>]+>", " ", s)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s
-
-
-def _xml_text(el: ET.Element | None) -> str:
-    if el is None:
-        return ""
-    return (el.text or "").strip()
-
-
-def _find_text(parent: ET.Element, names: list[str]) -> str:
-    for n in names:
-        el = parent.find(n)
-        if el is not None and (el.text or "").strip():
-            return (el.text or "").strip()
-        # namespaced tag endswith
-        for child in parent:
-            tag = child.tag.split("}")[-1] if isinstance(child.tag, str) else ""
-            if tag == n and (child.text or "").strip():
-                return (child.text or "").strip()
-    return ""
-
-
-def podcasts_catalog() -> dict:
-    return {"feeds": PODCAST_CATALOG, "count": len(PODCAST_CATALOG), "provider": "rss"}
-
-
-def podcasts_parse_feed(feed_url: str, limit: int | None = None) -> dict:
-    feed_url = (feed_url or "").strip()
-    if not feed_url.startswith("http://") and not feed_url.startswith("https://"):
-        raise ValueError("feed url must be http(s)")
-    limit = int(limit or PODCAST_MAX_EPISODES)
-    limit = max(1, min(limit, 50))
-    req = urllib.request.Request(
-        feed_url,
-        headers={"User-Agent": PODCAST_UA, "Accept": "application/rss+xml, application/xml, text/xml, */*"},
-    )
-    with urllib.request.urlopen(req, timeout=25) as resp:
-        raw = resp.read()
-        final_url = resp.geturl()
-    # strip default ns for easier parsing
-    root = ET.fromstring(raw)
-    channel = root.find("channel")
-    if channel is None:
-        # sometimes namespaced
-        for el in root.iter():
-            if isinstance(el.tag, str) and el.tag.endswith("channel"):
-                channel = el
-                break
-    if channel is None:
-        raise RuntimeError("not a valid RSS podcast feed")
-
-    title = _find_text(channel, ["title"]) or "Podcast"
-    desc = _strip_html(_find_text(channel, ["description", "summary"]))
-    author = _find_text(channel, ["author", "creator"]) or ""
-    link = _find_text(channel, ["link"]) or final_url
-
-    items = []
-    for child in list(channel):
-        tag = child.tag.split("}")[-1] if isinstance(child.tag, str) else ""
-        if tag != "item":
-            continue
-        it_title = _find_text(child, ["title"]) or "Episode"
-        it_desc = _strip_html(_find_text(child, ["description", "summary", "subtitle"]))
-        pub = _find_text(child, ["pubDate", "date"])
-        duration = _find_text(child, ["duration"])
-        # enclosure
-        enc_url = ""
-        enc_type = ""
-        enc_len = 0
-        for enc in child:
-            et = enc.tag.split("}")[-1] if isinstance(enc.tag, str) else ""
-            if et == "enclosure":
-                enc_url = enc.attrib.get("url") or ""
-                enc_type = enc.attrib.get("type") or ""
-                try:
-                    enc_len = int(enc.attrib.get("length") or 0)
-                except ValueError:
-                    enc_len = 0
-                break
-        if not enc_url:
-            # media:content
-            for enc in child:
-                et = enc.tag.split("}")[-1] if isinstance(enc.tag, str) else ""
-                if et == "content" and enc.attrib.get("url"):
-                    enc_url = enc.attrib.get("url") or ""
-                    enc_type = enc.attrib.get("type") or "audio/mpeg"
-                    break
-        if not enc_url:
-            continue
-        items.append(
-            {
-                "title": it_title,
-                "description": it_desc[:500],
-                "pub_date": pub,
-                "duration": duration,
-                "audio_url": enc_url,
-                "audio_type": enc_type or "audio/mpeg",
-                "audio_bytes": enc_len,
-            }
-        )
-        if len(items) >= limit:
-            break
-
-    return {
-        "title": title,
-        "description": desc[:800],
-        "author": author,
-        "link": link,
-        "feed_url": feed_url,
-        "episodes": items,
-        "count": len(items),
-        "provider": "rss",
-    }
-
-
-def podcasts_proxy_headers(audio_url: str) -> tuple[str, dict[str, str]]:
-    """HEAD/GET probe for content-type (not full body)."""
-    audio_url = (audio_url or "").strip()
-    if not audio_url.startswith("http"):
-        raise ValueError("invalid audio url")
-    req = urllib.request.Request(
-        audio_url,
-        method="HEAD",
-        headers={"User-Agent": PODCAST_UA},
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            ctype = resp.headers.get("Content-Type") or "audio/mpeg"
-            return resp.geturl(), {"Content-Type": ctype, "Content-Length": resp.headers.get("Content-Length") or ""}
-    except Exception:
-        return audio_url, {"Content-Type": "audio/mpeg"}
-
-
 
 class Handler(BaseHTTPRequestHandler):
     server_version = "PocketRelay/0.2"
@@ -1224,8 +1830,11 @@ class Handler(BaseHTTPRequestHandler):
     def _auth_ok(self) -> bool:
         if self.path.startswith("/health"):
             return True
-        # audio <audio src> cannot set headers — allow token query on podcast proxy only
-        if "/v1/podcasts/proxy" in (self.path or "") and TOKEN:
+        # <audio src> cannot set headers — allow token query on media proxies
+        if TOKEN and any(
+            x in (self.path or "")
+            for x in ("/v1/podcasts/proxy", "/v1/music/stream")
+        ):
             try:
                 q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
                 if (q.get("token") or [""])[0] == TOKEN:
@@ -1269,30 +1878,73 @@ class Handler(BaseHTTPRequestHandler):
         path = parsed.path
         qs = urllib.parse.parse_qs(parsed.query)
 
+        # Lightweight liveness for flip Ping (must stay <1s — no Mini/imsg/hermes)
+        if path in ("/ping", "/v1/ping"):
+            stt_info = stt_probe()
+            self._json(
+                200,
+                {
+                    "ok": True,
+                    "relay": "pocket-relay",
+                    "pong": True,
+                    "stt_ready": bool(stt_info.get("ready")),
+                    "stt_configured": True,
+                    "stt_model": stt_info.get("model"),
+                    "stt_engine": stt_info.get("engine"),
+                    "spotify_configured": True,
+                    "spotify_ready": True,
+                    "hermes_configured": True,
+                    "hermes_ready": True,
+                    "messages_configured": True,
+                    "messages_ready": True,
+                    "maps_ready": True,
+                    "maps_provider": "osm",
+                    "term_ready": True,
+                    "term_provider": "tailscale+ssh",
+                    "podcasts_ready": True,
+                    "podcasts_provider": "rss",
+                    "music_library": True,
+                    "contacts_loaded": len(_CONTACT_LIST),
+                },
+            )
+            return
+
         if path == "/health":
+            fast = (qs.get("fast") or ["0"])[0] in ("1", "true", "yes")
             mini: dict[str, Any] = {}
-            try:
-                st, body, _ = proxy("GET", "/health", None, {})
-                if st == 200:
-                    mini = json.loads(body.decode() or "{}")
-            except Exception as e:
-                mini = {"mini_error": str(e)}
+            if not fast:
+                try:
+                    # Short timeout so flip /health never hangs on Mini
+                    url = MINI + "/health"
+                    req = urllib.request.Request(url, method="GET")
+                    with urllib.request.urlopen(req, timeout=2) as resp:
+                        mini = json.loads(resp.read().decode() or "{}")
+                except Exception as e:
+                    mini = {"mini_error": str(e)[:200]}
             msg_ok, msg_err = False, None
-            try:
-                imsg_json(["chats", "--limit", "1"])
-                msg_ok = True
-            except Exception as e:
-                msg_err = str(e)[:300]
+            if not fast:
+                try:
+                    imsg_json(["chats", "--limit", "1"], timeout=3)
+                    msg_ok = True
+                except Exception as e:
+                    msg_err = str(e)[:300]
+            else:
+                msg_ok = True  # skip probe on fast path
             hermes_ok = False
-            try:
-                subprocess.run([HERMES, "version"], capture_output=True, timeout=10)
+            if not fast:
+                try:
+                    subprocess.run([HERMES, "version"], capture_output=True, timeout=2)
+                    hermes_ok = True
+                except Exception:
+                    pass
+            else:
                 hermes_ok = True
-            except Exception:
-                pass
             # Reload contacts if empty (FDA may have been granted after start)
-            load_contacts(force=not _CONTACT_LIST)
+            if not _CONTACT_LIST:
+                load_contacts(force=True)
             out = dict(mini) if isinstance(mini, dict) else {"mini": mini}
-            sp_ok, sp_err = spotify_ready()
+            sp_ok, sp_err = (True, None) if fast else spotify_ready()
+            stt_info = stt_probe()
             out.update(
                 {
                     "ok": True,
@@ -1305,6 +1957,9 @@ class Handler(BaseHTTPRequestHandler):
                     "spotify_configured": sp_ok,
                     "spotify_ready": sp_ok,
                     "spotify_error": sp_err,
+                    "music_library": True,
+                    "music_match_full": bool(MUSIC_MATCH_FULL and _ytdlp_available()),
+                    "music_ytdlp": _ytdlp_available(),
                     "contacts_loaded": len(_CONTACT_LIST),
                     "contacts_keys": len(_CONTACT_CACHE),
                     "contacts_error": _CONTACT_LOAD_ERROR,
@@ -1314,7 +1969,15 @@ class Handler(BaseHTTPRequestHandler):
                     "term_provider": "tailscale+ssh",
                     "podcasts_ready": True,
                     "podcasts_provider": "rss",
+                    # Override Mini's weak Whisper-base with local/cloud high-quality STT
+                    "stt_configured": True,
+                    "stt_ready": bool(stt_info.get("ready")),
+                    "stt_model": stt_info.get("model"),
+                    "stt_engine": stt_info.get("engine"),
+                    "stt_polish": bool(stt_info.get("polish")),
+                    "stt_error": stt_info.get("error"),
                     "imsg": IMSG,
+                    "fast": fast,
                 }
             )
             self._json(200, out)
@@ -1505,12 +2168,134 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(500, {"error": str(e)})
             return
 
+        if path in ("/v1/music/recent", "/v1/music/recently-played"):
+            try:
+                self._json(200, music_recent(int((qs.get("limit") or ["20"])[0])))
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
+        if path in ("/v1/music/liked", "/v1/music/saved", "/v1/music/library"):
+            try:
+                self._json(
+                    200,
+                    music_liked(
+                        int((qs.get("limit") or ["30"])[0]),
+                        int((qs.get("offset") or ["0"])[0]),
+                    ),
+                )
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
+        if path == "/v1/music/playlists":
+            try:
+                self._json(
+                    200,
+                    music_playlists(
+                        int((qs.get("limit") or ["30"])[0]),
+                        int((qs.get("offset") or ["0"])[0]),
+                    ),
+                )
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
+        if path == "/v1/music/playlist" or path.startswith("/v1/music/playlists/"):
+            pid = (qs.get("id") or qs.get("playlist_id") or [""])[0]
+            if path.startswith("/v1/music/playlists/"):
+                parts = path.strip("/").split("/")
+                # v1/music/playlists/{id}/...
+                if len(parts) >= 4:
+                    pid = parts[3]
+            try:
+                self._json(
+                    200,
+                    music_playlist_tracks(
+                        str(pid),
+                        int((qs.get("limit") or ["40"])[0]),
+                        int((qs.get("offset") or ["0"])[0]),
+                    ),
+                )
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
+        if path in ("/v1/music/now", "/v1/music/playing"):
+            try:
+                self._json(200, music_now())
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
         if path in ("/v1/music/devices", "/v1/music/status"):
             try:
                 action = "devices" if path.endswith("devices") else "status"
                 self._json(200, music_control(action))
             except Exception as e:
                 self._json(500, {"error": str(e)})
+            return
+
+        # Phone audio stream (preview or matched full). Auth via header or ?token=
+        if path == "/v1/music/stream":
+            uri = (qs.get("uri") or qs.get("track") or [""])[0]
+            mode = (qs.get("mode") or ["auto"])[0]
+            name = (qs.get("name") or [""])[0]
+            artists = (qs.get("artists") or [""])[0]
+            try:
+                track: dict[str, Any] = {"uri": uri, "name": name, "artists": artists}
+                if uri.startswith("spotify:track:"):
+                    tid = uri.split(":")[-1]
+                    try:
+                        raw = spotify_api("GET", f"/tracks/{tid}", {"market": "from_token"})
+                        nt = _normalize_track(raw, resolve_preview=True)
+                        if nt:
+                            track.update(nt)
+                    except Exception:
+                        pass
+                if not track.get("name") and name:
+                    track["name"] = name
+                    track["artists"] = artists
+                resolved = music_resolve_phone_audio(track)
+                target = None
+                kind = "none"
+                if mode in ("full", "auto") and resolved.get("phone_full_url"):
+                    target = resolved["phone_full_url"]
+                    kind = "full"
+                elif resolved.get("preview_url"):
+                    target = resolved["preview_url"]
+                    kind = "preview"
+                elif resolved.get("phone_full_url"):
+                    target = resolved["phone_full_url"]
+                    kind = "full"
+                if not target:
+                    self._json(
+                        404,
+                        {
+                            "error": "no phone audio — use Remote for full Spotify Connect",
+                            "track": resolved,
+                        },
+                    )
+                    return
+                req = urllib.request.Request(
+                    target,
+                    headers={"User-Agent": "BMudMusic/0.2", "Accept": "*/*"},
+                )
+                with urllib.request.urlopen(req, timeout=60) as resp:
+                    data = resp.read()
+                    ctype = resp.headers.get("Content-Type") or (
+                        "audio/mp4" if kind == "full" else "audio/mpeg"
+                    )
+                self.send_response(200)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("X-Bmud-Audio-Kind", kind)
+                self.send_header("Cache-Control", "private, max-age=120")
+                self.end_headers()
+                self.wfile.write(data)
+            except Exception as e:
+                self._json(500, {"error": str(e)[:400]})
             return
 
         if path.startswith("/v1/music"):
@@ -1595,7 +2380,8 @@ class Handler(BaseHTTPRequestHandler):
                 user = payload.get("user")
                 port = payload.get("port")
                 timeout = payload.get("timeout")
-                self._json(200, term_exec(str(host), str(command), user, port, timeout))
+                password = payload.get("password") or payload.get("pass") or payload.get("ssh_password")
+                self._json(200, term_exec(str(host), str(command), user, port, timeout, password))
             except Exception as e:
                 self._json(500, {"error": str(e)})
             return
@@ -1644,8 +2430,13 @@ class Handler(BaseHTTPRequestHandler):
             action = payload.get("action") or ("play" if path.endswith("play") else "")
             uri = payload.get("uri") or payload.get("track_uri")
             device_id = payload.get("device_id")
+            context_uri = payload.get("context_uri") or payload.get("context")
+            offset_uri = payload.get("offset_uri")
             try:
-                self._json(200, music_control(str(action), uri, device_id))
+                self._json(
+                    200,
+                    music_control(str(action), uri, device_id, context_uri, offset_uri),
+                )
             except Exception as e:
                 self._json(500, {"error": str(e)})
             return
@@ -1663,8 +2454,69 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(500, {"error": str(e)})
             return
 
+        if path == "/v1/music/resolve":
+            # Resolve phone audio for a track (preview + matched full)
+            try:
+                payload = json.loads(body.decode() or "{}")
+            except json.JSONDecodeError:
+                self._json(400, {"error": "invalid json"})
+                return
+            try:
+                t = {
+                    "uri": payload.get("uri"),
+                    "id": payload.get("id"),
+                    "name": payload.get("name") or "",
+                    "artists": payload.get("artists") or "",
+                    "preview_url": payload.get("preview_url"),
+                }
+                uri = t.get("uri") or ""
+                if uri.startswith("spotify:track:") and not t.get("name"):
+                    tid = uri.split(":")[-1]
+                    raw = spotify_api("GET", f"/tracks/{tid}", {"market": "from_token"})
+                    nt = _normalize_track(raw, resolve_preview=True)
+                    if nt:
+                        t.update(nt)
+                resolved = music_resolve_phone_audio(t)
+                self._json(200, {"ok": True, "track": resolved})
+            except Exception as e:
+                self._json(500, {"error": str(e)})
+            return
+
         if path.startswith("/v1/music"):
             self._json(404, {"error": "not found"})
+            return
+
+        # High-quality STT on this Mac (mlx large-v3-turbo + Grok polish).
+        # Falls back to Mini Whisper-base only if local/cloud engines unavailable.
+        if path.startswith("/v1/stt"):
+            parsed = urllib.parse.urlparse(self.path)
+            qs = urllib.parse.parse_qs(parsed.query)
+            lang = (qs.get("language") or qs.get("lang") or ["en"])[0]
+            polish_q = (qs.get("polish") or [None])[0]
+            polish = None
+            if polish_q is not None:
+                polish = str(polish_q).lower() not in ("0", "false", "no", "off")
+            ctype = self.headers.get("Content-Type", "") or ""
+            try:
+                status = stt_probe()
+                if status.get("engine") == "mini" or not status.get("ready"):
+                    hdrs = {k: v for k, v in self.headers.items()}
+                    code, resp, rctype = proxy("POST", self.path, body, hdrs)
+                    self._raw(code, resp, rctype)
+                    return
+                result = stt_transcribe(body, ctype, language=str(lang or "en"), polish=polish)
+                self._json(200 if result.get("ok") else 400, result)
+            except Exception as e:
+                # Last-resort Mini fallback so mic still works if local STT breaks
+                try:
+                    hdrs = {k: v for k, v in self.headers.items()}
+                    code, resp, rctype = proxy("POST", self.path, body, hdrs)
+                    if code < 500:
+                        self._raw(code, resp, rctype)
+                        return
+                except Exception:
+                    pass
+                self._json(500, {"ok": False, "error": str(e), "text": ""})
             return
 
         hdrs = {k: v for k, v in self.headers.items()}
@@ -1676,9 +2528,14 @@ def main() -> None:
     if not os.path.isfile(IMSG):
         raise SystemExit(f"imsg not found: {IMSG}")
     load_contacts()
+    stt_info = stt_probe()
     print(f"Pocket relay http://0.0.0.0:{PORT}")
     print(f"  imsg={IMSG} contacts={len(_CONTACT_CACHE)}")
     print(f"  hermes={HERMES} mini={MINI}")
+    print(
+        f"  stt engine={stt_info.get('engine')} model={stt_info.get('model')} "
+        f"polish={stt_info.get('polish')} ready={stt_info.get('ready')}"
+    )
     ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
 
 

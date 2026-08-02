@@ -8,7 +8,7 @@ A [KaiOS](https://www.kaiostech.com/) flip-phone app (built for **Nokia 2780**) 
 - **AI** (notes-context chat, or **Hermes** agent on your Mac)
 - **Messages** (iMessage/SMS via Mac [`imsg`](https://github.com/steipete/imsg))
 - **Contacts** (macOS Address Book search)
-- **Music** (30s previews on the phone + Spotify Connect remote)
+- **Music** (Spotify library browse + **Connect remote** for full tracks; handset previews by default)
 - **Maps** (OpenStreetMap search + text turn-by-turn; private)
 - **Terminal** (SSH any Tailscale host via Mac keys)
 - **Podcasts** (free public RSS → play on the handset)
@@ -100,8 +100,22 @@ Health check:
 curl -s http://127.0.0.1:8790/health | python3 -m json.tool
 ```
 
-See [docs/BRIDGE.md](docs/BRIDGE.md) for routes and privacy notes.
-Maps: [docs/MAPS.md](docs/MAPS.md). Terminal: [docs/TERMINAL.md](docs/TERMINAL.md). Podcasts: [docs/PODCASTS.md](docs/PODCASTS.md).
+See [docs/BRIDGE.md](docs/BRIDGE.md) for routes and privacy notes.  
+Maps · [docs/MAPS.md](docs/MAPS.md) · Terminal · [docs/TERMINAL.md](docs/TERMINAL.md) · Podcasts · [docs/PODCASTS.md](docs/PODCASTS.md) · Music · [docs/MUSIC.md](docs/MUSIC.md) · STT · [docs/STT.md](docs/STT.md).
+
+---
+
+## Disclaimer (read this)
+
+B-Mud is an **independent** open-source project. It is **not** affiliated with Spotify, Google, Apple, Nokia/HMD, or KaiOS.
+
+- You run the relay **yourself** on hardware you control.  
+- You use **your own** accounts and API tokens.  
+- **Spotify full-quality audio** is intended via **Spotify Connect** (official player on Mac/TV/etc.), not by redistributing Spotify’s catalog.  
+- Optional experimental flags (if you enable them) are **your** compliance responsibility.  
+- Full text: **[DISCLAIMER.md](DISCLAIMER.md)** · security: **[SECURITY.md](SECURITY.md)** · license: **[MIT](LICENSE)** (“AS IS”).
+
+Publishing this code does not grant anyone a license to third-party content or services.
 
 ---
 
@@ -135,7 +149,7 @@ Then load it **before** `storage.js` in your private deploy package (do not comm
 
 - **No tokens or API keys ship in this repo.** Set your own.
 - LAN-only by design. Do not port-forward the relay blindly.
-- See [SECURITY.md](SECURITY.md).
+- See [SECURITY.md](SECURITY.md) and [DISCLAIMER.md](DISCLAIMER.md).
 
 ---
 
@@ -151,13 +165,18 @@ Then load it **before** `storage.js` in your private deploy package (do not comm
 
 ## Contributing
 
-PRs welcome for nav UX, bridge endpoints, and device support beyond the 2780. Keep secrets out of commits. Prefer small, testable changes.
+PRs welcome for nav UX, bridge endpoints, and device support beyond the 2780.
+
+- Keep secrets out of commits (`js/config.local.js` is gitignored).  
+- Prefer small, testable changes.  
+- Do not add code that turns the relay into a public multi-user stream host.  
+- Keep **safe defaults** for anything that touches third-party media terms (see music defaults in [docs/MUSIC.md](docs/MUSIC.md)).
 
 ---
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE) — free to use and fork; **no warranty**. Third-party services remain under **their** terms.
 
 ---
 

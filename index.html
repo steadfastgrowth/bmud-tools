@@ -251,7 +251,7 @@
         <li tabindex="0" data-go="maps"><span class="num">4</span> Maps<span class="sub">OSM search · text directions</span></li>
         <li tabindex="0" data-go="term"><span class="num">5</span> Terminal<span class="sub">SSH any Tailscale host</span></li>
         <li tabindex="0" data-go="podcasts"><span class="num">6</span> Podcasts<span class="sub">Free RSS · play on phone</span></li>
-        <li tabindex="0" data-go="music"><span class="num">7</span> Music<span class="sub">Search · play on phone</span></li>
+        <li tabindex="0" data-go="music"><span class="num">7</span> Music<span class="sub">Library · play full on flip</span></li>
         <li tabindex="0" data-go="settings"><span class="num">8</span> Settings<span class="sub">Bridge URL + token</span></li>
       </ul>
       <div class="scroll-end"></div>
@@ -261,7 +261,7 @@
       <div class="card">
         <h2>Notes + Voice</h2>
         <button type="button" class="btn talk" id="btnTalk" tabindex="0">Talk (SIDE button)</button>
-        <div class="hint" id="sttHint">Select moves focus. SIDE button starts/stops voice into the focused box.</div>
+        <div class="hint" id="sttHint">SIDE button = talk. Mac large-v3 + Grok polish (Wispr-style).</div>
         <label>Note</label>
         <textarea id="note" rows="3" tabindex="0" placeholder="Speak or type…"></textarea>
         <button type="button" class="btn primary" id="btnSave" tabindex="0">Save note</button>
@@ -377,12 +377,14 @@
     <section id="v-term" class="view">
       <div class="card">
         <h2>Terminal</h2>
-        <div class="hint" id="termHint">SSH via Mac · use grok -p "question" (not bare grok)</div>
+        <div class="hint" id="termHint">SSH via Mac · password if no key · grok -p "q" (not bare grok)</div>
         <button type="button" class="btn primary" id="btnTermHosts" tabindex="0" data-action="term-hosts">Refresh hosts</button>
         <div class="now" id="termHostNow">Host: local (this Mac)</div>
         <ul class="list" id="termHosts"></ul>
         <label>User</label>
         <input id="termUser" type="text" tabindex="0" placeholder="ssh user (blank = Mac default)" />
+        <label>Password (remote only · blank = keys)</label>
+        <input id="termPass" type="password" tabindex="0" placeholder="paste SSH password if no key" autocomplete="off" />
         <label>Host override</label>
         <input id="termHost" type="text" tabindex="0" placeholder="local or 100.x / name" />
         <label>Command</label>
@@ -424,22 +426,36 @@
     <section id="v-music" class="view">
       <div class="card">
         <h2>Music</h2>
-        <div class="hint">Select track = 30s on this phone. Remote = full Spotify Connect.</div>
+        <div class="hint" id="musicHint">Select = phone preview. Remote = full Spotify Connect.</div>
+        <div class="row">
+          <button type="button" class="btn primary" id="btnMusicRecent" tabindex="0" data-action="music-recent">Recent</button>
+          <button type="button" class="btn ghost" id="btnMusicLiked" tabindex="0" data-action="music-liked">Liked</button>
+        </div>
+        <div class="row">
+          <button type="button" class="btn ghost" id="btnMusicPlaylists" tabindex="0" data-action="music-playlists">Playlists</button>
+          <button type="button" class="btn ghost" id="btnMusicMode" tabindex="0" data-action="music-mode">Mode: Phone</button>
+        </div>
         <input id="musicQ" type="text" tabindex="0" placeholder="Search… (Select = Search)" />
         <button type="button" class="btn primary" id="btnSearch" tabindex="0" data-action="music-search">Search</button>
         <div class="row">
           <button type="button" class="btn" id="btnStop" tabindex="0" data-action="music-stop">Stop</button>
-          <button type="button" class="btn ghost" id="btnRemote" tabindex="0" data-action="music-remote">Remote</button>
+          <button type="button" class="btn ghost" id="btnRemote" tabindex="0" data-action="music-remote">Remote full</button>
+        </div>
+        <div class="row">
+          <button type="button" class="btn ghost" id="btnMusicPrev" tabindex="0" data-action="music-prev">Prev</button>
+          <button type="button" class="btn ghost" id="btnRemotePause" tabindex="0" data-action="music-pause">Pause</button>
+          <button type="button" class="btn ghost" id="btnMusicNext" tabindex="0" data-action="music-next">Next</button>
         </div>
         <div class="row">
           <button type="button" class="btn ghost" id="btnDevices" tabindex="0" data-action="music-devices">Devices</button>
-          <button type="button" class="btn ghost" id="btnRemotePause" tabindex="0" data-action="music-pause">Pause rem.</button>
+          <button type="button" class="btn ghost" id="btnMusicNow" tabindex="0" data-action="music-now">Now playing</button>
         </div>
         <button type="button" class="btn" id="btnPlay" tabindex="0" data-action="music-play" style="display:none">Play</button>
         <button type="button" class="btn" id="btnPause" tabindex="0" data-action="music-pause" style="display:none">Pause</button>
         <div class="now" id="musicNow">—</div>
         <div class="hint" id="musicDeviceHint">Remote device: auto</div>
         <ul class="list" id="deviceList"></ul>
+        <ul class="list" id="playlistList"></ul>
         <ul class="list" id="musicList"></ul>
         <pre class="out" id="musicOut" style="display:none">—</pre>
       </div>

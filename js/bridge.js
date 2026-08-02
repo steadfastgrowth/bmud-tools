@@ -111,7 +111,8 @@ var PocketBridge = (function () {
 
   return {
     base: base,
-    ping: function () { return request('GET', '/health', null, 8000); },
+    // Fast liveness — full /health can exceed flip timeout when Mini/hermes is slow
+    ping: function () { return request('GET', '/ping', null, 12000); },
     chat: function (message, notes) {
       return request('POST', '/v1/chat', { message: message, notes: notes || '', device: 'bmud' });
     },
@@ -128,9 +129,46 @@ var PocketBridge = (function () {
     },
     stt: stt,
     musicSearch: function (q) { return request('POST', '/v1/music/search', { q: q }); },
-    musicControl: function (action, uri, deviceId) {
+    musicRecent: function (limit) {
+      return request('GET', '/v1/music/recent?limit=' + encodeURIComponent(limit || 20), null, 20000);
+    },
+    musicLiked: function (limit) {
+      return request('GET', '/v1/music/liked?limit=' + encodeURIComponent(limit || 30), null, 25000);
+    },
+    musicPlaylists: function (limit) {
+      return request('GET', '/v1/music/playlists?limit=' + encodeURIComponent(limit || 30), null, 20000);
+    },
+    musicPlaylistTracks: function (id, limit) {
+      return request(
+        'GET',
+        '/v1/music/playlist?id=' + encodeURIComponent(id || '') +
+          '&limit=' + encodeURIComponent(limit || 40),
+        null,
+        30000
+      );
+    },
+    musicNow: function () {
+      return request('GET', '/v1/music/now', null, 12000);
+    },
+    musicResolve: function (track) {
+      return request('POST', '/v1/music/resolve', track || {}, 60000);
+    },
+    musicStreamUrl: function (track, mode) {
+      var b = base();
+      if (!b || !track) return '';
+      var t = cfg().token || '';
+      var q =
+        'uri=' + encodeURIComponent(track.uri || '') +
+        '&name=' + encodeURIComponent(track.name || '') +
+        '&artists=' + encodeURIComponent(track.artists || '') +
+        '&mode=' + encodeURIComponent(mode || 'auto');
+      if (t) q += '&token=' + encodeURIComponent(t);
+      return b + '/v1/music/stream?' + q;
+    },
+    musicControl: function (action, uri, deviceId, contextUri) {
       var body = { action: action, uri: uri || null };
       if (deviceId) body.device_id = deviceId;
+      if (contextUri) body.context_uri = contextUri;
       return request('POST', '/v1/music/control', body);
     },
     musicDevices: function () {
@@ -171,13 +209,15 @@ var PocketBridge = (function () {
     termHosts: function () {
       return request('GET', '/v1/term/hosts', null, 15000);
     },
-    termExec: function (host, command, user, timeout) {
+    termExec: function (host, command, user, timeout, password) {
       var body = {
         host: host || 'local',
         command: command || '',
         user: user || null
       };
       if (timeout) body.timeout = timeout;
+      // Only send when set — remote hosts without keys need this (SSH_ASKPASS on Mac)
+      if (password) body.password = password;
       return request('POST', '/v1/term/exec', body, Math.max(20000, ((timeout || 60) + 15) * 1000));
     },
     podcastsCatalog: function () {

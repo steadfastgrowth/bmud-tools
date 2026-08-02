@@ -10,6 +10,8 @@ export IMSG_BIN="${IMSG_BIN:-imsg}"
 export HERMES_BIN="${HERMES_BIN:-hermes}"
 export RELAY_HOST="${RELAY_HOST:-0.0.0.0}"
 export RELAY_PORT="${RELAY_PORT:-8790}"
+# Music: previews + Spotify Connect by default. Experimental handset match is opt-in.
+export MUSIC_MATCH_FULL="${MUSIC_MATCH_FULL:-0}"
 
 if [ -z "$POCKET_TOKEN" ]; then
   echo "Set POCKET_TOKEN to a shared secret (same value as phone Settings → Token)" >&2

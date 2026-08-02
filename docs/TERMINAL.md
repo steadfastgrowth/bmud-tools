@@ -10,32 +10,36 @@ Run shell commands on **any host your Mac can SSH to** — typically everything 
 ```
 
 - **Local host** (`local` / this Mac’s name or `100.x`): runs on the relay Mac with your login shell (no `sshd` needed).
-- **Remote hosts**: `ssh -o BatchMode=yes` using the **Mac’s SSH keys/agent**. Password prompts are not supported on the flip.
+- **Remote hosts**: SSH from the Mac. Prefer **keys** (`BatchMode`); or fill **Password** on the flip for one-shot `SSH_ASKPASS` password auth.
 
 ## Phone UX
 
 1. Hub → **Terminal**
 2. **Refresh hosts** → pick a Tailscale peer
 3. Set **User** (default = Mac username)
-4. Type a **Command** → **Run**
-5. Scroll **Output** lines with D-pad
+4. Optional: **Password** for remote hosts without keys (paste/type; blank = keys only)
+5. Type a **Command** → **Run**
+6. Scroll **Output** lines with D-pad
 
 ## API
 
 | Method | Path | Body / query |
 |--------|------|----------------|
 | GET | `/v1/term/hosts` | Tailscale status JSON → host list |
-| POST | `/v1/term/exec` | `{ "host", "command", "user?", "port?", "timeout?" }` |
+| POST | `/v1/term/exec` | `{ "host", "command", "user?", "password?", "port?", "timeout?" }` |
+
+Password is only used for remote SSH. It is never stored on the phone (field only) and is not written to the event log.
 
 ## Setup for remote hosts
 
-On each machine you want to reach:
-
+**Option A — keys (best):**
 ```bash
 # copy your Mac public key
 ssh-copy-id user@100.x.y.z
 # or install the key manually in ~/.ssh/authorized_keys
 ```
+
+**Option B — password:** fill the Password field on the flip before **Run**. The relay feeds OpenSSH via `SSH_ASKPASS` (no interactive TTY).
 
 Enable **Remote Login** (sshd) on macOS targets: System Settings → General → Sharing → Remote Login.
 

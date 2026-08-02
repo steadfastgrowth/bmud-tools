@@ -12,7 +12,10 @@
   var idx = 0;
   var chat = null;
   var lastUri = null;
-  var lastTrack = null; // { uri, name, artists, preview_url }
+  var lastTrack = null; // { uri, name, artists, preview_url, ... }
+  var musicPlayMode = 'phone'; // phone | remote
+  var musicContextUri = null; // playlist/album for remote queue
+  var playlists = [];
   var tracks = [];
   var lastField = null;
   var listening = false;
@@ -235,7 +238,14 @@
       else renderPodFeeds(podCatalog, 'catalog');
       renderPodSubsHint();
     }
-    if (name === 'music') refreshMusicDeviceHint();
+    if (name === 'music') {
+      refreshMusicDeviceHint();
+      syncMusicModeUi();
+      if (!tracks.length && !playlists.length) {
+        // auto-load recent so Music isn't empty
+        setTimeout(function () { try { musicLoadRecent(); } catch (e) {} }, 80);
+      }
+    }
     if (name === 'settings') {
       fillCfg();
       renderLog();
@@ -311,6 +321,7 @@
       else c = 'Open';
     } else if (view === 'music') {
       if (el && el.getAttribute && el.getAttribute('data-track-i') != null) c = 'Play';
+      else if (el && el.getAttribute && el.getAttribute('data-playlist-i') != null) c = 'Open';
       else if (el && el.getAttribute && el.getAttribute('data-device-i') != null) c = 'Pick';
       else if (id === 'btnStop') c = 'Stop';
       else if (id === 'btnDevices') c = 'Devices';
@@ -423,11 +434,18 @@
       case 'pod-stop': stopPodcast(); return true;
       case 'pod-sub': subscribeCurrentPod(); return true;
       case 'music-search': musicSearch(); return true;
-      case 'music-play': playPhoneTrack(lastTrack); return true;
+      case 'music-play': activateMusicTrack(lastTrack); return true;
       case 'music-stop': stopPhoneAudio(); return true;
       case 'music-remote': musicCtrl('play'); return true;
       case 'music-pause': musicCtrl('pause'); return true;
       case 'music-devices': loadMusicDevices(); return true;
+      case 'music-recent': musicLoadRecent(); return true;
+      case 'music-liked': musicLoadLiked(); return true;
+      case 'music-playlists': musicLoadPlaylists(); return true;
+      case 'music-mode': toggleMusicPlayMode(); return true;
+      case 'music-next': musicCtrl('next'); return true;
+      case 'music-prev': musicCtrl('previous'); return true;
+      case 'music-now': musicLoadNow(); return true;
       case 'save-note':
         if ($('btnSave')) { try { $('btnSave').click(); } catch (e) {} }
         return true;
@@ -544,7 +562,12 @@
     if (view === 'music') {
       var ti = el.getAttribute && el.getAttribute('data-track-i');
       if (ti != null && ti !== '') {
-        playPhoneTrack(tracks[parseInt(ti, 10)]);
+        activateMusicTrack(tracks[parseInt(ti, 10)]);
+        return;
+      }
+      var pli = el.getAttribute && el.getAttribute('data-playlist-i');
+      if (pli != null && pli !== '') {
+        musicOpenPlaylist(playlists[parseInt(pli, 10)]);
         return;
       }
       var di = el.getAttribute && el.getAttribute('data-device-i');
@@ -556,6 +579,13 @@
       if (id === 'btnDevices') { loadMusicDevices(); return; }
       if (id === 'btnRemote' || id === 'btnPlay') { musicCtrl('play'); return; }
       if (id === 'btnRemotePause' || id === 'btnPause') { musicCtrl('pause'); return; }
+      if (id === 'btnMusicRecent') { musicLoadRecent(); return; }
+      if (id === 'btnMusicLiked') { musicLoadLiked(); return; }
+      if (id === 'btnMusicPlaylists') { musicLoadPlaylists(); return; }
+      if (id === 'btnMusicMode') { toggleMusicPlayMode(); return; }
+      if (id === 'btnMusicNext') { musicCtrl('next'); return; }
+      if (id === 'btnMusicPrev') { musicCtrl('previous'); return; }
+      if (id === 'btnMusicNow') { musicLoadNow(); return; }
       if (id === 'btnSearch' || id === 'musicQ') { musicSearch(); return; }
       musicSearch();
       return;
@@ -706,7 +736,18 @@
     }
     toast('Listening');
 
-    navigator.mediaDevices.getUserMedia({ audio: true }).then(function (s) {
+    // Prefer clean mono capture (Wispr/Granola-class input for the Mac STT stack)
+    var audioConstraints = {
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+        channelCount: 1
+      }
+    };
+    navigator.mediaDevices.getUserMedia(audioConstraints).catch(function () {
+      return navigator.mediaDevices.getUserMedia({ audio: true });
+    }).then(function (s) {
       if (!listening) {
         s.getTracks().forEach(function (t) { t.stop(); });
         return;
@@ -880,40 +921,47 @@
   function ping() {
     setStatus('…');
     setCaps('ping…');
-    if (!PocketBridge.base()) {
+    var base = PocketBridge.base();
+    if (!base) {
       setStatus('no url', false);
       setCaps('no bridge URL', 'err');
       if ($('cfgOut')) $('cfgOut').textContent = 'Set Bridge URL';
       return;
     }
+    // Ensure Settings fields match what we actually use
+    if ($('url') && !$('url').value) $('url').value = base;
     PocketBridge.ping().then(function (r) {
       setStatus('online', true);
       var bits = [];
+      if (r.pong) bits.push('pong');
       if (r.messages_ready) bits.push('imsg');
-      else bits.push('imsg×');
+      else if (r.messages_ready === false) bits.push('imsg×');
       if (r.stt_ready || r.stt_configured) bits.push('stt');
       if (r.spotify_ready || r.spotify_configured) bits.push('spotify');
       if (r.hermes_ready || r.hermes_configured) bits.push('hermes');
       if (r.maps_ready || r.maps_provider) bits.push('maps');
       if (r.term_ready || r.term_provider) bits.push('term');
       if (r.podcasts_ready || r.podcasts_provider) bits.push('podcasts');
+      if (r.music_library) bits.push('music');
       if (r.contacts_loaded) bits.push(r.contacts_loaded + ' contacts');
       if (r.relay) bits.push(r.relay);
       var line = bits.join(' · ') || 'ok';
       lastCaps = line;
       setCaps(line, r.messages_ready === false ? 'err' : 'ok');
-      if ($('cfgOut')) $('cfgOut').textContent = line;
+      if ($('cfgOut')) $('cfgOut').textContent = line + '\n' + base;
       if ($('capsDetail')) $('capsDetail').textContent = line +
         (r.messages_error ? (' | ' + String(r.messages_error).slice(0, 80)) : '');
       log('ping ok ' + line);
+      toast('Online');
     }).catch(function (e) {
       setStatus('offline', false);
       var err = String(e.message || e);
       setCaps(err.slice(0, 60), 'err');
       lastCaps = err;
-      if ($('cfgOut')) $('cfgOut').textContent = err;
-      if ($('capsDetail')) $('capsDetail').textContent = err;
-      log('ping fail: ' + err, 'err');
+      if ($('cfgOut')) $('cfgOut').textContent = err + '\n' + base;
+      if ($('capsDetail')) $('capsDetail').textContent = err + ' · ' + base;
+      log('ping fail: ' + err + ' @ ' + base, 'err');
+      toast('Ping failed');
     });
   }
 
@@ -1658,6 +1706,7 @@
   function termRun() {
     var host = ($('termHost') && $('termHost').value || termHost || 'local').replace(/^\s+|\s+$/g, '');
     var user = ($('termUser') && $('termUser').value || '').replace(/^\s+|\s+$/g, '');
+    var pass = ($('termPass') && $('termPass').value || '');
     var cmd = ($('termCmd') && $('termCmd').value || '').replace(/^\s+|\s+$/g, '');
     if (!host) host = 'local';
     if (!cmd) {
@@ -1670,10 +1719,13 @@
     }
     termHost = host;
     refreshTermHostNow();
-    toast('Running…');
-    if ($('termMeta')) $('termMeta').textContent = 'Running on ' + host + '…';
+    toast(pass ? 'Running (password auth)…' : 'Running…');
+    if ($('termMeta')) {
+      $('termMeta').textContent =
+        'Running on ' + host + (pass ? ' · password auth' : ' · keys/local') + '…';
+    }
     renderTermOutput('…', 'Running…');
-    PocketBridge.termExec(host, cmd, user || null, 90).then(function (r) {
+    PocketBridge.termExec(host, cmd, user || null, 90, pass || null).then(function (r) {
       var out = '';
       if (r.stdout) out += r.stdout;
       if (r.stderr) out += (out ? '\n' : '') + r.stderr;
@@ -1682,11 +1734,13 @@
         (r.ok ? 'ok' : 'fail') +
         ' · exit ' + (r.exit_code != null ? r.exit_code : '?') +
         ' · ' + (r.mode || 'ssh') +
+        (r.auth ? ' · ' + r.auth : '') +
         ' · ' + (r.elapsed_s != null ? r.elapsed_s + 's' : '') +
         (r.truncated ? ' · truncated' : '');
       renderTermOutput(out || '(empty)', meta);
       toast(r.ok ? 'Done' : ('Exit ' + r.exit_code));
-      log('term ' + host + ' ' + (r.ok ? 'ok' : 'fail'));
+      // Never log password — only host + ok/fail
+      log('term ' + host + ' ' + (r.ok ? 'ok' : 'fail') + (r.auth ? ' ' + r.auth : ''));
       setTimeout(function () {
         collect();
         var i;
@@ -1950,6 +2004,56 @@
     toast('Stopped');
   }
 
+  function syncMusicModeUi() {
+    if ($('btnMusicMode')) {
+      $('btnMusicMode').textContent = musicPlayMode === 'remote' ? 'Mode: Remote' : 'Mode: Phone';
+    }
+    if ($('musicHint')) {
+      $('musicHint').textContent = musicPlayMode === 'remote'
+        ? 'Select = full Spotify Connect (recommended).'
+        : 'Select = phone preview. Use Remote for full Spotify.';
+    }
+  }
+
+  function toggleMusicPlayMode() {
+    musicPlayMode = musicPlayMode === 'remote' ? 'phone' : 'remote';
+    syncMusicModeUi();
+    toast(musicPlayMode === 'remote' ? 'Remote mode' : 'Phone mode');
+  }
+
+  function focusFirstTrackOrPlaylist() {
+    setTimeout(function () {
+      collect();
+      var i;
+      for (i = 0; i < items.length; i++) {
+        if (items[i].getAttribute && items[i].getAttribute('data-track-i') === '0') {
+          focusAt(i);
+          return;
+        }
+      }
+      for (i = 0; i < items.length; i++) {
+        if (items[i].getAttribute && items[i].getAttribute('data-playlist-i') === '0') {
+          focusAt(i);
+          return;
+        }
+      }
+    }, 40);
+  }
+
+  function activateMusicTrack(t) {
+    if (!t) {
+      toast('Pick a track');
+      return;
+    }
+    lastTrack = t;
+    lastUri = t.uri || lastUri;
+    if (musicPlayMode === 'remote') {
+      musicCtrl('play');
+      return;
+    }
+    playPhoneTrack(t);
+  }
+
   function playPhoneTrack(t) {
     if (!t) {
       toast('Search + pick a track');
@@ -1957,61 +2061,116 @@
     }
     lastTrack = t;
     lastUri = t.uri || lastUri;
-    var url = t.preview_url || t.previewUrl || '';
-    if (!url) {
-      setMusicNow('No phone preview · use Remote for full track');
-      toast('No phone audio — try Remote');
-      return;
-    }
     var a = $('musicPlayer');
     if (!a) {
       toast('No audio element');
       return;
     }
-    setMusicNow('Phone · ' + (t.name || 'track'));
+    // Prefer relay stream (full match or preview) so KaiOS can play via token URL
+    var streamUrl = PocketBridge.musicStreamUrl(t, 'auto');
+    var fallback = t.preview_url || t.previewUrl || '';
+    setMusicNow('Loading · ' + (t.name || 'track'));
     toast('Playing on phone…');
-    try {
-      a.pause();
-      a.src = url;
-      a.load();
-      var p = a.play();
-      phonePlaying = true;
-      if (p && p.then) {
-        p.then(function () {
-          phonePlaying = true;
-          setMusicNow('▶ ' + (t.name || 'track'));
-        }).catch(function (err) {
-          phonePlaying = false;
-          setMusicNow('Play failed');
-          toast(String(err && err.message ? err.message : err));
-        });
+
+    function startSrc(url, label) {
+      try {
+        stopPhoneAudioQuiet();
+        a.src = url;
+        a.load();
+        var p = a.play();
+        phonePlaying = true;
+        if (p && p.then) {
+          p.then(function () {
+            phonePlaying = true;
+            setMusicNow((label || '▶') + ' ' + (t.name || 'track'));
+          }).catch(function (err) {
+            phonePlaying = false;
+            if (fallback && url !== fallback) {
+              startSrc(fallback, '▶ 30s');
+              return;
+            }
+            setMusicNow('Phone fail · try Remote');
+            toast(String(err && err.message ? err.message : err));
+          });
+        }
+      } catch (e) {
+        phonePlaying = false;
+        toast(String(e.message || e));
       }
-    } catch (e) {
-      phonePlaying = false;
-      toast(String(e.message || e));
     }
+
+    if (streamUrl) {
+      startSrc(streamUrl, '▶');
+      return;
+    }
+    if (fallback) {
+      startSrc(fallback, '▶ 30s');
+      return;
+    }
+    // No phone audio — fall back to remote full
+    setMusicNow('No phone audio · Remote full…');
+    toast('Remote full…');
+    musicCtrl('play');
   }
 
-  function renderTracks(list) {
+  function renderTracks(list, opts) {
+    opts = opts || {};
     tracks = list || [];
     var ul = $('musicList');
     if (!ul) return;
     ul.innerHTML = '';
-    var i, t, li, can;
-    for (i = 0; i < tracks.length && i < 8; i++) {
+    if ($('playlistList') && !opts.keepPlaylists) $('playlistList').innerHTML = '';
+    var i, t, li, badge, sub, dur;
+    var max = opts.max || 40;
+    for (i = 0; i < tracks.length && i < max; i++) {
       t = tracks[i];
-      can = !!(t.preview_url || t.previewUrl || t.can_play_on_phone);
+      // FULL only if relay opted into experimental match; default is preview/remote
+      badge = 'PLAY';
+      if (t.phone_play_mode === 'full' || t.phone_full_url) badge = 'FULL';
+      else if (t.preview_url || t.previewUrl || t.can_play_on_phone) badge = 'PHONE';
+      else badge = 'REMOTE';
       li = document.createElement('li');
-      li.className = 'track' + (can ? '' : ' noprev');
+      li.className = 'track';
       li.tabIndex = 0;
       li.setAttribute('data-track-i', String(i));
-      li.innerHTML = '<span class="badge">' + (can ? 'PHONE' : 'REMOTE') + '</span>' +
-        '<div class="name"></div><span class="sub"></span>';
+      li.innerHTML = '<span class="badge"></span><div class="name"></div><span class="sub"></span>';
+      li.querySelector('.badge').textContent = badge;
       li.querySelector('.name').textContent = (i + 1) + '. ' + (t.name || 'Track');
-      li.querySelector('.sub').textContent = (t.artists || '') + (t.album ? ' · ' + t.album : '');
+      if (t.duration_s) {
+        var sec = t.duration_s % 60;
+        dur = ' · ' + Math.floor(t.duration_s / 60) + ':' + (sec < 10 ? '0' : '') + sec;
+      } else {
+        dur = '';
+      }
+      sub = (t.artists || '') + (t.album ? ' · ' + t.album : '') + dur;
+      li.querySelector('.sub').textContent = sub;
       (function (track) {
-        li.onclick = function () { playPhoneTrack(track); };
+        li.onclick = function () { activateMusicTrack(track); };
       })(t);
+      ul.appendChild(li);
+    }
+  }
+
+  function renderPlaylists(list) {
+    playlists = list || [];
+    var ul = $('playlistList');
+    if (!ul) return;
+    ul.innerHTML = '';
+    if ($('musicList')) $('musicList').innerHTML = '';
+    var i, p, li;
+    for (i = 0; i < playlists.length && i < 40; i++) {
+      p = playlists[i];
+      li = document.createElement('li');
+      li.tabIndex = 0;
+      li.setAttribute('data-playlist-i', String(i));
+      li.innerHTML = '<span class="badge">LIST</span><div class="name"></div><span class="sub"></span>';
+      li.querySelector('.name').textContent = (i + 1) + '. ' + (p.name || 'Playlist');
+      li.querySelector('.sub').textContent =
+        (p.owner ? p.owner + ' · ' : '') +
+        (p.tracks_total != null ? p.tracks_total + ' tracks' : '');
+      (function (pl) {
+        li.onclick = function () { musicOpenPlaylist(pl); };
+      })(p);
       ul.appendChild(li);
     }
   }
@@ -2028,9 +2187,11 @@
       setMusicNow('Set Bridge URL in Settings, then Ping.');
       return;
     }
+    musicContextUri = null;
     toast('Searching…');
     setMusicNow('Searching…');
     if ($('musicList')) $('musicList').innerHTML = '';
+    if ($('playlistList')) $('playlistList').innerHTML = '';
     PocketBridge.musicSearch(q).then(function (r) {
       if (r && r.ok === false) {
         setMusicNow(r.message || 'fail');
@@ -2046,23 +2207,110 @@
       lastUri = list[0].uri;
       lastTrack = list[0];
       renderTracks(list);
-      toast(list.length + ' tracks · Select to play');
-      setMusicNow(list.length + ' results · ↓ then Select = play on phone');
-      // focus first track so user can scroll results immediately
-      setTimeout(function () {
-        collect();
-        var i;
-        for (i = 0; i < items.length; i++) {
-          if (items[i].getAttribute && items[i].getAttribute('data-track-i') === '0') {
-            focusAt(i);
-            return;
-          }
-        }
-      }, 40);
+      toast(list.length + ' tracks');
+      setMusicNow(list.length + ' results · Select = ' + (musicPlayMode === 'remote' ? 'remote' : 'phone'));
+      focusFirstTrackOrPlaylist();
     }).catch(function (e) {
       var err = String(e.message || e);
       setMusicNow(err);
       toast('Music: ' + err);
+    });
+  }
+
+  function musicLoadRecent() {
+    if (!PocketBridge.base()) { toast('Set bridge'); return; }
+    musicContextUri = null;
+    toast('Recent…');
+    setMusicNow('Loading recently played…');
+    PocketBridge.musicRecent(25).then(function (r) {
+      var list = (r && r.tracks) || [];
+      if (!list.length) { setMusicNow('No recent tracks'); toast('Empty'); return; }
+      lastTrack = list[0];
+      lastUri = list[0].uri;
+      renderTracks(list);
+      setMusicNow('Recently played · ' + list.length);
+      toast(list.length + ' recent');
+      focusFirstTrackOrPlaylist();
+    }).catch(function (e) {
+      setMusicNow(String(e.message || e));
+      toast('Recent: ' + (e.message || e));
+    });
+  }
+
+  function musicLoadLiked() {
+    if (!PocketBridge.base()) { toast('Set bridge'); return; }
+    musicContextUri = null;
+    toast('Liked…');
+    setMusicNow('Loading liked songs…');
+    PocketBridge.musicLiked(40).then(function (r) {
+      var list = (r && r.tracks) || [];
+      if (!list.length) { setMusicNow('No liked songs'); toast('Empty'); return; }
+      lastTrack = list[0];
+      lastUri = list[0].uri;
+      renderTracks(list);
+      setMusicNow('Liked · ' + list.length + (r.total ? '/' + r.total : ''));
+      toast(list.length + ' liked');
+      focusFirstTrackOrPlaylist();
+    }).catch(function (e) {
+      setMusicNow(String(e.message || e));
+      toast('Liked: ' + (e.message || e));
+    });
+  }
+
+  function musicLoadPlaylists() {
+    if (!PocketBridge.base()) { toast('Set bridge'); return; }
+    toast('Playlists…');
+    setMusicNow('Loading playlists…');
+    PocketBridge.musicPlaylists(40).then(function (r) {
+      var list = (r && r.playlists) || [];
+      if (!list.length) { setMusicNow('No playlists'); toast('Empty'); return; }
+      renderPlaylists(list);
+      setMusicNow('Playlists · ' + list.length + ' · Select to open');
+      toast(list.length + ' playlists');
+      focusFirstTrackOrPlaylist();
+    }).catch(function (e) {
+      setMusicNow(String(e.message || e));
+      toast('Playlists: ' + (e.message || e));
+    });
+  }
+
+  function musicOpenPlaylist(pl) {
+    if (!pl || !pl.id) { toast('No playlist'); return; }
+    toast('Opening…');
+    setMusicNow('Loading ' + (pl.name || 'playlist') + '…');
+    musicContextUri = pl.uri || ('spotify:playlist:' + pl.id);
+    PocketBridge.musicPlaylistTracks(pl.id, 50).then(function (r) {
+      var list = (r && r.tracks) || [];
+      if ($('playlistList')) $('playlistList').innerHTML = '';
+      if (!list.length) { setMusicNow('Empty playlist'); toast('Empty'); return; }
+      lastTrack = list[0];
+      lastUri = list[0].uri;
+      renderTracks(list);
+      setMusicNow((r.playlist_name || pl.name || 'Playlist') + ' · ' + list.length);
+      toast(list.length + ' tracks');
+      focusFirstTrackOrPlaylist();
+    }).catch(function (e) {
+      setMusicNow(String(e.message || e));
+      toast('Playlist: ' + (e.message || e));
+    });
+  }
+
+  function musicLoadNow() {
+    if (!PocketBridge.base()) { toast('Set bridge'); return; }
+    PocketBridge.musicNow().then(function (r) {
+      var it = r && r.item;
+      if (!it) {
+        setMusicNow(r && r.is_playing ? 'Playing (unknown)' : 'Nothing playing');
+        toast('No track');
+        return;
+      }
+      lastTrack = it;
+      lastUri = it.uri;
+      setMusicNow((r.is_playing ? '▶ ' : '❚❚ ') + (it.name || '') +
+        (r.device && r.device.name ? ' · ' + r.device.name : ''));
+      toast(r.is_playing ? 'Playing' : 'Paused');
+    }).catch(function (e) {
+      toast(String(e.message || e));
     });
   }
 
@@ -2130,7 +2378,7 @@
   }
 
   function musicCtrl(a) {
-    if (a === 'play' && !lastUri && !(lastTrack && lastTrack.uri)) {
+    if ((a === 'play' || a === 'resume') && !lastUri && !(lastTrack && lastTrack.uri) && !musicContextUri) {
       toast('Pick a track first');
       return;
     }
@@ -2146,9 +2394,12 @@
       }
     }
     var devId = PocketStore.loadCfg().musicDeviceId || null;
+    var ctx = musicContextUri || null;
     toast(a === 'play' ? 'Remote play…' : a + '…');
     setMusicNow((a === 'play' ? 'Remote… ' : a + '… ') + (lastTrack && lastTrack.name ? lastTrack.name : ''));
-    PocketBridge.musicControl(a, uri, devId).then(function (r) {
+    // pause/stop phone audio when going remote
+    if (a === 'play') stopPhoneAudioQuiet();
+    PocketBridge.musicControl(a, uri, devId, ctx).then(function (r) {
       var dev = r.device || PocketStore.loadCfg().musicDeviceName || (r.ok ? 'ok' : JSON.stringify(r).slice(0, 80));
       setMusicNow((a === 'play' ? 'Remote ▶ ' : a + ' · ') + dev +
         (lastTrack && lastTrack.name ? ' · ' + lastTrack.name : ''));
@@ -2337,8 +2588,16 @@
     if ($('btnRemote')) $('btnRemote').onclick = function () { musicCtrl('play'); };
     if ($('btnDevices')) $('btnDevices').onclick = loadMusicDevices;
     if ($('btnRemotePause')) $('btnRemotePause').onclick = function () { musicCtrl('pause'); };
-    if ($('btnPlay')) $('btnPlay').onclick = function () { playPhoneTrack(lastTrack); };
+    if ($('btnPlay')) $('btnPlay').onclick = function () { activateMusicTrack(lastTrack); };
     if ($('btnPause')) $('btnPause').onclick = function () { musicCtrl('pause'); };
+    if ($('btnMusicRecent')) $('btnMusicRecent').onclick = musicLoadRecent;
+    if ($('btnMusicLiked')) $('btnMusicLiked').onclick = musicLoadLiked;
+    if ($('btnMusicPlaylists')) $('btnMusicPlaylists').onclick = musicLoadPlaylists;
+    if ($('btnMusicMode')) $('btnMusicMode').onclick = toggleMusicPlayMode;
+    if ($('btnMusicNext')) $('btnMusicNext').onclick = function () { musicCtrl('next'); };
+    if ($('btnMusicPrev')) $('btnMusicPrev').onclick = function () { musicCtrl('previous'); };
+    if ($('btnMusicNow')) $('btnMusicNow').onclick = musicLoadNow;
+    syncMusicModeUi();
     if ($('btnSaveCfg')) $('btnSaveCfg').onclick = saveCfg;
     if ($('btnPing')) $('btnPing').onclick = ping;
 
@@ -2346,7 +2605,7 @@
     if (player) {
       player.addEventListener('ended', function () {
         phonePlaying = false;
-        setMusicNow('Preview ended');
+        setMusicNow('Track ended');
       });
       player.addEventListener('error', function () {
         phonePlaying = false;

@@ -6,7 +6,7 @@ var PocketStore = (function () {
   var RECENTS = 'pocket.recents.v1';
   var LOG = 'pocket.log.v1';
   var PLACES = 'pocket.places.v1';
-  var APP_VERSION = '0.10.0';
+  var APP_VERSION = '0.11.2';
   var PODCASTS = 'pocket.podcasts.v1';
 
   function loadNotes() {
@@ -56,6 +56,8 @@ var PocketStore = (function () {
       }
       var cfg = JSON.parse(raw);
       var changed = false;
+      // Prefer packaged personal defaults when present (USB reverse / IP changes)
+      if (def.bridgeUrl && cfg.bridgeUrl !== def.bridgeUrl) { cfg.bridgeUrl = def.bridgeUrl; changed = true; }
       if (!cfg.bridgeUrl && def.bridgeUrl) { cfg.bridgeUrl = def.bridgeUrl; changed = true; }
       if (!cfg.token && def.token) { cfg.token = def.token; changed = true; }
       if (!cfg.aiMode) { cfg.aiMode = def.aiMode; changed = true; }
